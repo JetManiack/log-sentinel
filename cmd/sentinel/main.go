@@ -73,7 +73,10 @@ func run(ctx context.Context, cfgPath, listenAddr string) error {
 		return err
 	}
 
-	runner, findings := detector.New(cfg, db, mask)
+	runner, findings, err := detector.New(cfg, db, mask)
+	if err != nil {
+		return err
+	}
 	triager := triage.New(cfg.LLM, mask)
 	stdout := sink.NewStdout()
 	boardClient := board.New(cfg.Sinks.Board, db)

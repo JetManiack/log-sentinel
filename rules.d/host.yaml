@@ -1,25 +1,33 @@
+# Host / systemd rules — LogsQL syntax (VictoriaLogs).
+#
+# These assume logs are shipped via systemd-journal-upload (VictoriaLogs
+# accepts journald streams natively). The `unit` stream label is set by
+# VictoriaLogs from the journald `_SYSTEMD_UNIT` field.
+#
+# Adjust stream selectors to match your journald collector's label names.
+
 rules:
   - id: "sshd-failure"
     severity: "medium"
     description: "SSH login failures or invalid users"
-    query: '{unit="ssh.service"} |~ "Failed password|Invalid user|authentication failure"'
+    query: '{unit="ssh.service"} ("Failed password" OR "Invalid user" OR "authentication failure")'
 
   - id: "sshd-new-key"
     severity: "medium"
-    description: "SSH login with a previously unseen public key"
-    query: '{unit="ssh.service"} |= "Accepted publickey" != "AAAA"'
+    description: "SSH login with a public key"
+    query: '{unit="ssh.service"} "Accepted publickey"'
 
   - id: "sudo-command"
     severity: "medium"
     description: "sudo command executed"
-    query: '{unit="sudo"} |= "COMMAND="'
+    query: '{unit="sudo.service"} "COMMAND="'
 
   - id: "useradd-usermod"
     severity: "high"
     description: "User account created or modified"
-    query: '{job=~".+"} |~ "useradd|usermod|adduser|groupadd"'
+    query: '"useradd" OR "usermod" OR "adduser" OR "groupadd"'
 
   - id: "kernel-oops"
     severity: "critical"
     description: "Kernel oops, taint or segfault"
-    query: '{unit="kernel"} |~ "Oops|BUG:|kernel BUG|segfault|tainted"'
+    query: '{unit="kernel"} ("Oops" OR "BUG:" OR "kernel BUG" OR "segfault" OR "tainted")'

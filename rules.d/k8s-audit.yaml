@@ -1,20 +1,37 @@
+# Kubernetes audit-log rules — LogsQL syntax (VictoriaLogs).
+#
+# Field names depend on how your log collector annotates audit events.
+# These examples assume vlagent/vector writing Kubernetes audit events as
+# JSON lines with fields parsed by VictoriaLogs structured-log parsing.
+# Adjust label names to match your collector's output.
+#
+# Tested syntax reference:
+#   https://docs.victoriametrics.com/victorialogs/logsql/
+#
+# Replace these queries with real LogsQL verified against your VictoriaLogs
+# instance before deploying. The per-cluster rules.d takes precedence over
+# these examples.
+
 rules:
   - id: "k8s-exec-attach"
     severity: "high"
     description: "kubectl exec or attach into a running pod"
-    query: '{kubernetes_namespace=~".+"} |~ "pods/exec|pods/attach" |= "verb\":\"create\""'
+    # Example: audit events have parsed fields objectRef.subresource and verb.
+    # Adjust stream selector to match how your audit log is labelled.
+    query: 'objectRef.subresource:exec OR objectRef.subresource:attach verb:create'
 
   - id: "k8s-secrets-read"
     severity: "high"
     description: "Secrets get/list by a non-controller identity"
-    query: '{kubernetes_namespace=~".+"} |= "\"resource\":\"secrets\"" |~ "\"verb\":\"get\"|\"verb\":\"list\"" != "system:controller" != "system:serviceaccount:kube-system"'
+    query: 'objectRef.resource:secrets (verb:get OR verb:list) AND NOT user.username:system:serviceaccount:kube-system* AND NOT user.username:system:controller:*'
 
   - id: "k8s-rbac-write"
     severity: "high"
     description: "RBAC ClusterRole or RoleBinding created or modified"
-    query: '{kubernetes_namespace=~".+"} |~ "clusterroles|clusterrolebindings|rolebindings" |~ "\"verb\":\"create\"|\"verb\":\"update\"|\"verb\":\"patch\"|\"verb\":\"delete\""'
+    query: '(objectRef.resource:clusterroles OR objectRef.resource:clusterrolebindings OR objectRef.resource:rolebindings) (verb:create OR verb:update OR verb:patch OR verb:delete)'
 
   - id: "k8s-image-digest-change"
     severity: "medium"
     description: "Running container image digest changed (may indicate an unauthorised image)"
-    query: '{kubernetes_namespace=~".+"} |= "image changed" |= "digest"'
+    # Adjust to match how your collector reports image changes.
+    query: '"image changed" "digest"'

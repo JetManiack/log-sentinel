@@ -17,7 +17,11 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) (*VLClient, *httptest
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	src := config.LogSource{Name: "test", URL: srv.URL}
-	return NewVLClient(src, masker.Default()), srv
+	c, err := NewVLClient(src, masker.Default())
+	if err != nil {
+		t.Fatalf("NewVLClient: %v", err)
+	}
+	return c, srv
 }
 
 func TestVLClientQuery(t *testing.T) {

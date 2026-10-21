@@ -17,11 +17,11 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S sentinel && adduser -S sentinel -G sentinel
+    addgroup -S -g 10001 sentinel && adduser -S -u 10001 -G sentinel sentinel
 WORKDIR /app
 COPY --from=builder --chown=sentinel:sentinel /out/sentinel .
 RUN mkdir -p /app/data /app/rules.d && chown -R sentinel:sentinel /app
-USER sentinel
+USER 10001
 EXPOSE 9100
 ENTRYPOINT ["./sentinel"]
 CMD ["--config=/etc/sentinel/config.yaml"]

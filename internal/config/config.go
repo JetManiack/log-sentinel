@@ -43,6 +43,9 @@ type LogSource struct {
 	URL string `yaml:"url"`
 	// Token is an optional Bearer token.
 	Token string `yaml:"token"`
+	// CAFile is an optional path to a PEM CA certificate to trust for TLS.
+	// Useful when the VictoriaLogs endpoint uses a private CA.
+	CAFile string `yaml:"ca_file"`
 }
 
 // LLMConfig configures the optional triage model.

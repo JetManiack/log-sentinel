@@ -2,12 +2,15 @@ package detector
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -24,13 +27,34 @@ type VLClient struct {
 }
 
 // NewVLClient creates a client for the given base URL.
-func NewVLClient(src config.LogSource, m *masker.Mask) *VLClient {
-	return &VLClient{
-		base:   src.URL,
-		token:  src.Token,
-		client: &http.Client{Timeout: 30 * time.Second},
-		mask:   m,
+// When src.CAFile is set, the custom CA is trusted in addition to system roots.
+func NewVLClient(src config.LogSource, m *masker.Mask) (*VLClient, error) {
+	transport := http.DefaultTransport
+	if src.CAFile != "" {
+		pem, err := os.ReadFile(src.CAFile) // #nosec G304 -- operator-supplied CA path
+		if err != nil {
+			return nil, fmt.Errorf("logsql: read ca_file %q: %w", src.CAFile, err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("logsql: no valid certificates in ca_file %q", src.CAFile)
+		}
+		transport = &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		}
 	}
+	return &VLClient{
+		base:  src.URL,
+		token: src.Token,
+		client: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		},
+		mask: m,
+	}, nil
 }
 
 // vlEntry is one result row from VictoriaLogs /select/logsql/query.

@@ -1,13 +1,15 @@
+# Network rules — LogsQL syntax (VictoriaLogs).
+
 rules:
   - id: "squid-denied"
     severity: "high"
     description: "Squid blocked an outbound connection — possible exfiltration or C2"
-    # Use substring match because full form is TCP_DENIED_ABORTED/403 etc.
-    query: '{job=~".+"} |~ "TCP_DENIED"'
+    query: '"TCP_DENIED"'
 
   - id: "dns-first-seen"
     severity: "medium"
     description: "Pod resolved a domain it has never contacted before"
-    # This rule is processed by the DNS-baseline anomaly detector,
-    # not by plain LogsQL. The query is used only for log retrieval.
-    query: '{kubernetes_namespace=~".+"} |= "dns" |= "A?"'
+    # This rule is evaluated by the DNS-baseline anomaly detector, not by plain
+    # LogsQL. The query below is used only for log retrieval context.
+    # Adjust to match how your DNS query log is structured.
+    query: 'dns_query_type:A OR dns_query_type:AAAA'

@@ -9,6 +9,7 @@ logs:
   # - name: "remote"
   #   url: "https://vlogs.cluster2.example.internal"
   #   token: "sk-..."
+  #   ca_file: "/etc/ssl/certs/cluster2-ca.pem"  # optional: private CA for TLS
 
 detector:
   interval: 1m
@@ -19,16 +20,14 @@ detector:
   # rules_dir loads all *.yaml files from a directory (optional).
   rules_dir: "rules.d"
 
-  # Fail-open patterns are always scanned, regardless of rules.
-  fail_open_patterns:
-    - "401"
-    - "403"
-    - "connection refused"
-    - "x509"
-    - "no such host"
-    - "permission denied"
-    - "automigrate"
-    - "LocalServerException"
+  # Fail-open patterns are scanned on every poll independently of rules.
+  # They are intentionally empty by default: security-only deployment should
+  # not fire on reliability/availability patterns. Uncomment and configure
+  # only if you want a last-resort backstop for uncovered attack patterns.
+  fail_open_patterns: []
+  # fail_open_patterns:
+  #   - "permission denied"
+  #   - "x509"
 
   # Known-benign suppresses notifications for matched log lines.
   known_benign:

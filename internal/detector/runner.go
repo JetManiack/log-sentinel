@@ -2,6 +2,7 @@ package detector
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -22,7 +23,8 @@ type Runner struct {
 }
 
 // New creates a Runner. The returned channel receives findings as they are produced.
-func New(cfg *config.Config, db *state.DB, mask *masker.Mask) (*Runner, <-chan Finding) {
+// Returns an error if any log source fails to initialise (e.g. unreadable ca_file).
+func New(cfg *config.Config, db *state.DB, mask *masker.Mask) (*Runner, <-chan Finding, error) {
 	ch := make(chan Finding, 64)
 	r := &Runner{
 		cfg:     cfg,
@@ -32,9 +34,13 @@ func New(cfg *config.Config, db *state.DB, mask *masker.Mask) (*Runner, <-chan F
 		out:     ch,
 	}
 	for _, src := range cfg.Logs {
-		r.clients[src.Name] = NewVLClient(src, mask)
+		c, err := NewVLClient(src, mask)
+		if err != nil {
+			return nil, nil, fmt.Errorf("detector: init source %q: %w", src.Name, err)
+		}
+		r.clients[src.Name] = c
 	}
-	return r, ch
+	return r, ch, nil
 }
 
 // Run starts the polling loop. It blocks until ctx is cancelled.
@@ -65,7 +71,12 @@ func (r *Runner) poll(ctx context.Context) {
 				ctxCfg.ContextWindow, ctxCfg.ContextLines, 50,
 			)
 			if err != nil {
-				slog.Warn("detector query failed", "rule", rule.ID, "source", srcName, "err", err)
+				// Fail loud: a broken rule query must be visible as a finding,
+				// not a silent warn. An operator watching stdout or the board
+				// will see it immediately.
+				slog.Error("detector query failed — rule may be producing no results",
+					"rule", rule.ID, "source", srcName, "err", err)
+				r.emitDetectorError(ctx, rule, srcName, err)
 				continue
 			}
 			if len(matched) == 0 {
@@ -134,6 +145,26 @@ func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 				FiredAt:     end,
 			}
 		}
+	}
+}
+
+// emitDetectorError fires a high-severity finding so that a broken rule query
+// is visible in the stdout sink and on the board — not just a log line.
+func (r *Runner) emitDetectorError(ctx context.Context, rule config.Rule, srcName string, queryErr error) {
+	fp := Fingerprint("detector-error", srcName, rule.ID)
+	quiet, _ := r.db.IsQuiet(fp)
+	if quiet {
+		return
+	}
+	r.db.Upsert(fp, "detector-error", SeverityHigh, srcName) //nolint:errcheck
+	r.out <- Finding{
+		Fingerprint: fp,
+		RuleID:      "detector-error",
+		Severity:    SeverityHigh,
+		Source:      srcName,
+		Description: fmt.Sprintf("rule %q query returned an error — detector may be producing no results", rule.ID),
+		Evidence:    []string{queryErr.Error()},
+		FiredAt:     time.Now(),
 	}
 }
 
