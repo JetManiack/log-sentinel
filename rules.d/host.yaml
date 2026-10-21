@@ -1,0 +1,25 @@
+rules:
+  - id: "sshd-failure"
+    severity: "medium"
+    description: "SSH login failures or invalid users"
+    query: '{unit="ssh.service"} |~ "Failed password|Invalid user|authentication failure"'
+
+  - id: "sshd-new-key"
+    severity: "medium"
+    description: "SSH login with a previously unseen public key"
+    query: '{unit="ssh.service"} |= "Accepted publickey" != "AAAA"'
+
+  - id: "sudo-command"
+    severity: "medium"
+    description: "sudo command executed"
+    query: '{unit="sudo"} |= "COMMAND="'
+
+  - id: "useradd-usermod"
+    severity: "high"
+    description: "User account created or modified"
+    query: '{job=~".+"} |~ "useradd|usermod|adduser|groupadd"'
+
+  - id: "kernel-oops"
+    severity: "critical"
+    description: "Kernel oops, taint or segfault"
+    query: '{unit="kernel"} |~ "Oops|BUG:|kernel BUG|segfault|tainted"'

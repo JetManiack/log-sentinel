@@ -1,0 +1,8 @@
+bin/
+data/
+.git/
+.github/
+*.md
+config.yaml
+*.local.yaml
+.env

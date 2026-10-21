@@ -1,0 +1,13 @@
+rules:
+  - id: "squid-denied"
+    severity: "high"
+    description: "Squid blocked an outbound connection — possible exfiltration or C2"
+    # Use substring match because full form is TCP_DENIED_ABORTED/403 etc.
+    query: '{job=~".+"} |~ "TCP_DENIED"'
+
+  - id: "dns-first-seen"
+    severity: "medium"
+    description: "Pod resolved a domain it has never contacted before"
+    # This rule is processed by the DNS-baseline anomaly detector,
+    # not by plain LogsQL. The query is used only for log retrieval.
+    query: '{kubernetes_namespace=~".+"} |= "dns" |= "A?"'

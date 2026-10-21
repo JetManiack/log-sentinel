@@ -1,0 +1,66 @@
+state: "data/sentinel.db"
+
+logs:
+  - name: "local"
+    url: "http://victorialogs:9428"
+    # token: ""  # optional Bearer token
+
+  # Second cluster (read-only ingress):
+  # - name: "remote"
+  #   url: "https://vlogs.cluster2.example.internal"
+  #   token: "sk-..."
+
+detector:
+  interval: 1m
+  window_before: 30m
+  window_after: 15m
+  quiet_window_default: 24h
+
+  # rules_dir loads all *.yaml files from a directory (optional).
+  rules_dir: "rules.d"
+
+  # Fail-open patterns are always scanned, regardless of rules.
+  fail_open_patterns:
+    - "401"
+    - "403"
+    - "connection refused"
+    - "x509"
+    - "no such host"
+    - "permission denied"
+    - "automigrate"
+    - "LocalServerException"
+
+  # Known-benign suppresses notifications for matched log lines.
+  known_benign:
+    - pattern: "kubelet readiness probe"
+      reason: "routine k8s liveness probe traffic"
+    - pattern: "transaction-end-before-headers"
+      reason: "squid TCP probe artefact, not a real request"
+
+llm:
+  enabled: false
+  # base_url: "http://llm-gateway/v1"
+  # api_key: ""
+  # model: "gemma-4-26b-a4b-it"
+  max_tokens_step: 256
+  max_tokens_final: 1200
+  step_timeout: 60s
+  total_timeout: 240s
+
+sinks:
+  stdout_json: true  # always-on; vlagent picks up these lines
+
+  board:
+    enabled: false
+    # url: "https://board.example.com/mcp"
+    # token: ""
+    min_severity: "medium"
+
+  webhook:
+    enabled: false
+    # url: "https://hooks.example.com/sentinel"
+    # token: ""
+
+digest:
+  time: "19:00"
+  timezone: "UTC"

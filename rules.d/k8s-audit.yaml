@@ -1,0 +1,20 @@
+rules:
+  - id: "k8s-exec-attach"
+    severity: "high"
+    description: "kubectl exec or attach into a running pod"
+    query: '{kubernetes_namespace=~".+"} |~ "pods/exec|pods/attach" |= "verb\":\"create\""'
+
+  - id: "k8s-secrets-read"
+    severity: "high"
+    description: "Secrets get/list by a non-controller identity"
+    query: '{kubernetes_namespace=~".+"} |= "\"resource\":\"secrets\"" |~ "\"verb\":\"get\"|\"verb\":\"list\"" != "system:controller" != "system:serviceaccount:kube-system"'
+
+  - id: "k8s-rbac-write"
+    severity: "high"
+    description: "RBAC ClusterRole or RoleBinding created or modified"
+    query: '{kubernetes_namespace=~".+"} |~ "clusterroles|clusterrolebindings|rolebindings" |~ "\"verb\":\"create\"|\"verb\":\"update\"|\"verb\":\"patch\"|\"verb\":\"delete\""'
+
+  - id: "k8s-image-digest-change"
+    severity: "medium"
+    description: "Running container image digest changed (may indicate an unauthorised image)"
+    query: '{kubernetes_namespace=~".+"} |= "image changed" |= "digest"'
