@@ -1,7 +1,10 @@
 package triage
 
 import (
+	"os"
 	"testing"
+
+	"github.com/JetManiack/log-sentinel/internal/prompt"
 )
 
 func TestCapSeverityRaiseNoChange(t *testing.T) {
@@ -49,5 +52,47 @@ func TestCapSeverityRaiseAtCeiling(t *testing.T) {
 	got := capSeverityRaise("critical", "critical")
 	if got != "critical" {
 		t.Fatalf("want critical, got %q", got)
+	}
+}
+
+func TestBuildResponseFormatUsesJSONSchema(t *testing.T) {
+	mgr, err := prompt.New("")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rf := buildResponseFormat(mgr, "triage")
+	if rf == nil {
+		t.Fatal("response format should not be nil")
+	}
+	if rf.Type != "json_schema" {
+		t.Errorf("expected json_schema, got %q", rf.Type)
+	}
+	if rf.JSONSchema == nil {
+		t.Error("json_schema wrapper should be set")
+	}
+	if rf.JSONSchema.Name == "" {
+		t.Error("schema name should not be empty")
+	}
+	if !rf.JSONSchema.Strict {
+		t.Error("strict should be true")
+	}
+}
+
+func TestBuildResponseFormatFallsBackToJSONObject(t *testing.T) {
+	// A blueprint without a schema should fall back to json_object.
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/triage.yaml", []byte("name: triage\ncritical: true\nsystem: sys\nuser: usr\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := prompt.New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rf := buildResponseFormat(mgr, "triage")
+	if rf.Type != "json_object" {
+		t.Errorf("expected json_object fallback, got %q", rf.Type)
+	}
+	if rf.JSONSchema != nil {
+		t.Error("json_schema should be nil for fallback")
 	}
 }

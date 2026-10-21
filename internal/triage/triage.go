@@ -63,8 +63,17 @@ type oaiRequest struct {
 	ResponseFormat *respFormat  `json:"response_format,omitempty"`
 }
 
+// respFormat selects between json_object (basic) and json_schema (structured output).
+// When Schema is non-nil the provider is asked for strict structured output.
 type respFormat struct {
-	Type string `json:"type"`
+	Type       string         `json:"type"`
+	JSONSchema *jsonSchemaWrap `json:"json_schema,omitempty"`
+}
+
+type jsonSchemaWrap struct {
+	Name   string          `json:"name"`
+	Schema json.RawMessage `json:"schema"`
+	Strict bool            `json:"strict"`
 }
 
 type oaiResponse struct {
@@ -103,15 +112,16 @@ func (t *Triager) Enrich(ctx context.Context, f detector.Finding, knownBenign []
 		return nil
 	}
 
+	rf := buildResponseFormat(t.prompts, "triage")
 	reqBody := oaiRequest{
 		Model: t.cfg.Model,
 		Messages: []oaiMessage{
 			{Role: "system", Content: systemContent},
 			{Role: "user", Content: userContent},
 		},
-		MaxTokens:   t.cfg.MaxTokensFinal,
-		Temperature: 0,
-		ResponseFormat: &respFormat{Type: "json_object"},
+		MaxTokens:      t.cfg.MaxTokensFinal,
+		Temperature:    0,
+		ResponseFormat: rf,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -218,6 +228,24 @@ func buildPrompt(
 		KnownBenign:          benign,
 	}
 	return mgr.Execute("triage", data)
+}
+
+// buildResponseFormat returns the response_format to request from the provider.
+// When the blueprint declares a JSON Schema, json_schema (strict) is used;
+// otherwise json_object is the fallback so the model still returns valid JSON.
+func buildResponseFormat(mgr *prompt.Manager, name string) *respFormat {
+	raw, schemaName, ok := mgr.Schema(name)
+	if ok && len(raw) > 0 {
+		return &respFormat{
+			Type: "json_schema",
+			JSONSchema: &jsonSchemaWrap{
+				Name:   schemaName,
+				Schema: raw,
+				Strict: true,
+			},
+		}
+	}
+	return &respFormat{Type: "json_object"}
 }
 
 var severityOrder = map[string]int{

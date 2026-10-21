@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,78 @@ func TestMissingOverrideDirIsNotError(t *testing.T) {
 	_, err := New("/nonexistent/prompts/dir")
 	if err != nil {
 		t.Fatalf("missing override dir should not be fatal: %v", err)
+	}
+}
+
+func TestBuiltinTriageHasSchema(t *testing.T) {
+	mgr, err := New("")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	raw, name, ok := mgr.Schema("triage")
+	if !ok {
+		t.Fatal("triage blueprint should declare a schema")
+	}
+	if name == "" {
+		t.Error("schema name should not be empty")
+	}
+	// Verify it round-trips as valid JSON.
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+	if v["type"] != "object" {
+		t.Errorf("expected schema type=object, got %v", v["type"])
+	}
+}
+
+func TestSchemaAbsentForMissingBlueprint(t *testing.T) {
+	mgr, err := New("")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _, ok := mgr.Schema("nonexistent")
+	if ok {
+		t.Error("Schema() should return ok=false for a missing blueprint")
+	}
+}
+
+func TestOverrideDirCanAddSchema(t *testing.T) {
+	dir := t.TempDir()
+	override := `name: triage
+version: "99.0.0"
+critical: true
+schema:
+  name: custom_verdict
+  schema:
+    type: object
+    additionalProperties: false
+    properties:
+      result:
+        type: string
+    required: [result]
+system: |
+  sys
+user: |
+  user {{ .RuleID }}
+`
+	if err := os.WriteFile(filepath.Join(dir, "triage.yaml"), []byte(override), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := New(dir)
+	if err != nil {
+		t.Fatalf("New with override: %v", err)
+	}
+	raw, name, ok := mgr.Schema("triage")
+	if !ok {
+		t.Fatal("override blueprint should have schema")
+	}
+	if name != "custom_verdict" {
+		t.Errorf("expected schema name 'custom_verdict', got %q", name)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("schema not valid JSON: %v", err)
 	}
 }
 

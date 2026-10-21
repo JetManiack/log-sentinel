@@ -1,15 +1,43 @@
 name: triage
-version: "1.0.0"
+version: "1.1.0"
 critical: true
 description: "Security triage: analyse a suspicious log event and return a structured verdict"
 
+# Structured-output contract. When the provider supports OpenAI-compatible json_schema,
+# the triager sends this as response_format (strict), ensuring the model can only emit
+# a conforming object. strict mode requires every property in "required" and
+# additionalProperties:false.
+schema:
+  name: triage_verdict
+  schema:
+    type: object
+    additionalProperties: false
+    properties:
+      severity:
+        type: string
+        enum: [low, medium, high, critical]
+      what_happened_ru:
+        type: string
+      impact_ru:
+        type: string
+      evidence:
+        type: array
+        items:
+          type: string
+      likely_benign_reason:
+        type: string
+      recommended_check_ru:
+        type: string
+      confidence:
+        type: number
+    required: [severity, what_happened_ru, impact_ru, evidence, likely_benign_reason, recommended_check_ru, confidence]
+
 system: |
   Ты — security-аналитик, получаешь подозрительное событие из логов кластера.
-  Проанализируй и верни compact single-line JSON без пробелов между полями:
-  {"severity":"low|medium|high|critical","what_happened_ru":"...","impact_ru":"...","evidence":["..."],"likely_benign_reason":"...","recommended_check_ru":"...","confidence":0.0}
-  Поля likely_benign_reason и recommended_check_ru — опциональные, оставь пустыми если неприменимо.
+  Проанализируй событие и верни JSON-объект строго по схеме.
+  Поля likely_benign_reason и recommended_check_ru — обязательные в схеме; оставь пустой строкой если неприменимо.
   Severity не может быть ниже той, что определил детектор (указана в запросе).
-  Если не хватает данных — честно укажи.
+  Если не хватает данных — честно укажи в соответствующих полях.
 
 user: |
   Правило: {{ .RuleID }} (severity детектора: {{ .Severity }})
