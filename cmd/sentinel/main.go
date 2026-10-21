@@ -96,6 +96,9 @@ func run(ctx context.Context, cfgPath, listenAddr string) error {
 	// Start the detector.
 	go runner.Run(ctx)
 
+	// Poll board threads for /quiet /benign /unquiet commands.
+	go boardClient.PollCommands(ctx, cfg.Commands, db, cfg.Detector.Interval)
+
 	slog.Info("sentinel started", "version", version)
 
 	// Dispatch findings.

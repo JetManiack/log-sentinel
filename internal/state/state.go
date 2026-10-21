@@ -189,3 +189,39 @@ func (d *DB) AddBenignOverride(pattern, reason, author string, expiresAt time.Ti
 	}
 	return d.g.Create(&b).Error
 }
+
+// AllBoardThreadIDs returns a map of fingerprint → boardThreadID for all findings
+// that have a board thread assigned.
+func (d *DB) AllBoardThreadIDs() (map[string]string, error) {
+	var findings []Finding
+	err := d.g.Select("fingerprint, board_thread_id").
+		Where("board_thread_id != ''").Find(&findings).Error
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(findings))
+	for _, f := range findings {
+		m[f.Fingerprint] = f.BoardThreadID
+	}
+	return m, nil
+}
+
+// FindingSeverity returns the severity stored for a fingerprint.
+func (d *DB) FindingSeverity(fingerprint string) (string, error) {
+	var f Finding
+	err := d.g.Select("severity").Where("fingerprint = ?", fingerprint).First(&f).Error
+	if err != nil {
+		return "", err
+	}
+	return f.Severity, nil
+}
+
+// FindingRuleID returns the rule_id stored for a fingerprint.
+func (d *DB) FindingRuleID(fingerprint string) (string, error) {
+	var f Finding
+	err := d.g.Select("rule_id").Where("fingerprint = ?", fingerprint).First(&f).Error
+	if err != nil {
+		return "", err
+	}
+	return f.RuleID, nil
+}

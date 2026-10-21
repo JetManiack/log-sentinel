@@ -258,9 +258,19 @@ var severityLevels = map[string]int{
 	detector.SeverityCritical: 3,
 }
 
+const severityUnknown = 4 // above critical → always meets threshold (fail-closed)
+
 func meetsMinSeverity(actual, min string) bool {
 	if min == "" {
 		min = detector.SeverityMedium
 	}
-	return severityLevels[actual] >= severityLevels[min]
+	aLevel, aOK := severityLevels[actual]
+	if !aOK {
+		aLevel = severityUnknown
+	}
+	mLevel, mOK := severityLevels[min]
+	if !mOK {
+		mLevel = 0 // unknown min → let everything through
+	}
+	return aLevel >= mLevel
 }

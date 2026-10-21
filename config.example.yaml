@@ -64,3 +64,13 @@ sinks:
 digest:
   time: "19:00"
   timezone: "UTC"
+
+commands:
+  # Board actor nicknames allowed to issue /quiet /benign /unquiet.
+  allowed_actors: []
+  # Subset of allowed_actors that may quiet critical findings.
+  critical_mute_actors: []
+  # Maximum quiet window an agent (non-critical-mute actor) can set (days).
+  max_agent_quiet_days: 7
+  # How long an agent /benign entry lasts before operator confirmation (days).
+  max_agent_benign_days: 30

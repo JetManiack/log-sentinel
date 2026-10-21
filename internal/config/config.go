@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -29,6 +30,9 @@ type Config struct {
 
 	// Digest configures the daily low-severity digest.
 	Digest DigestConfig `yaml:"digest"`
+
+	// Commands configures the board reply command parser.
+	Commands CommandsConfig `yaml:"commands"`
 }
 
 // LogSource is a single log backend.
@@ -180,13 +184,44 @@ type ruleFile struct {
 	Rules []Rule `yaml:"rules"`
 }
 
-// loadRulesDir globs cfg.Detector.RulesDir for *.yaml files, parses each, and
-// appends their rules to cfg.Detector.Rules, skipping IDs already defined inline.
+// validSeverities lists the accepted rule severity values.
+var validSeverities = map[string]struct{}{
+	"low": {}, "medium": {}, "high": {}, "critical": {},
+}
+
+// validateRule returns an error if a rule is missing required fields or has an
+// unrecognised severity.
+func validateRule(r Rule, source string) error {
+	if r.ID == "" {
+		return fmt.Errorf("config: %s: rule missing id", source)
+	}
+	if r.Query == "" {
+		return fmt.Errorf("config: %s: rule %q missing query", source, r.ID)
+	}
+	if _, ok := validSeverities[r.Severity]; !ok {
+		return fmt.Errorf("config: %s: rule %q has unknown severity %q (want low/medium/high/critical)", source, r.ID, r.Severity)
+	}
+	return nil
+}
+
+// loadRulesDir globs cfg.Detector.RulesDir for *.yaml files and appends their
+// rules to cfg.Detector.Rules.
+//
+//   - Inline rules always take precedence over directory rules (same ID is skipped
+//     with a warning).
+//   - A malformed or unreadable file is skipped with a warning, not a fatal error,
+//     so one bad file cannot disable all detection.
+//   - Duplicate IDs across directory files are also warned, and the first-seen
+//     definition wins (alphabetical file order).
 func loadRulesDir(cfg *Config) error {
 	dir := cfg.Detector.RulesDir
-	// Build a set of IDs already defined inline so they take precedence.
+
+	// Validate inline rules first.
 	inlineIDs := make(map[string]struct{}, len(cfg.Detector.Rules))
 	for _, r := range cfg.Detector.Rules {
+		if err := validateRule(r, "inline"); err != nil {
+			return err
+		}
 		inlineIDs[r.ID] = struct{}{}
 	}
 
@@ -196,21 +231,38 @@ func loadRulesDir(cfg *Config) error {
 		return fmt.Errorf("config: rules_dir glob %s: %w", pattern, err)
 	}
 
+	// seen tracks all IDs including inline ones, for cross-file duplicate detection.
+	seen := make(map[string]struct{}, len(inlineIDs))
+	for id := range inlineIDs {
+		seen[id] = struct{}{}
+	}
+
 	for _, path := range matches {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("config: rules_dir read %s: %w", path, err)
+			slog.Warn("config: rules_dir: skipping unreadable file", "path", path, "err", err)
+			continue
 		}
 		var rf ruleFile
 		if err := yaml.Unmarshal(data, &rf); err != nil {
-			return fmt.Errorf("config: rules_dir parse %s: %w", path, err)
+			slog.Warn("config: rules_dir: skipping malformed file", "path", path, "err", err)
+			continue
 		}
 		for _, r := range rf.Rules {
-			if _, exists := inlineIDs[r.ID]; exists {
+			if err := validateRule(r, path); err != nil {
+				slog.Warn("config: rules_dir: skipping invalid rule", "path", path, "err", err)
+				continue
+			}
+			if _, isInline := inlineIDs[r.ID]; isInline {
+				slog.Warn("config: rules_dir: rule ID shadowed by inline rule, skipping", "id", r.ID, "file", path)
+				continue
+			}
+			if _, dup := seen[r.ID]; dup {
+				slog.Warn("config: rules_dir: duplicate rule ID across directory files, keeping first", "id", r.ID, "file", path)
 				continue
 			}
 			cfg.Detector.Rules = append(cfg.Detector.Rules, r)
-			inlineIDs[r.ID] = struct{}{}
+			seen[r.ID] = struct{}{}
 		}
 	}
 	return nil
@@ -254,5 +306,11 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Digest.Timezone == "" {
 		cfg.Digest.Timezone = "UTC"
+	}
+	if cfg.Commands.MaxAgentQuietDays == 0 {
+		cfg.Commands.MaxAgentQuietDays = 7
+	}
+	if cfg.Commands.MaxAgentBenignDays == 0 {
+		cfg.Commands.MaxAgentBenignDays = 30
 	}
 }
