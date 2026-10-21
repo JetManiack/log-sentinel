@@ -23,6 +23,24 @@ func TestIsBenign(t *testing.T) {
 	}
 }
 
+func TestLogsqlQuote(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"permission denied", `"permission denied"`},
+		{`back\slash`, `"back\\slash"`},
+		{`quote"inside`, `"quote\"inside"`},
+		{`both\"`, `"both\\\""`},
+	}
+	for _, c := range cases {
+		got := logsqlQuote(c.in)
+		if got != c.want {
+			t.Errorf("logsqlQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	lines := []string{"a", "b", "c", "d", "e"}
 	got := truncate(lines, 3)

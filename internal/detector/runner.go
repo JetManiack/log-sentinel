@@ -118,10 +118,19 @@ func (r *Runner) poll(ctx context.Context) {
 	}
 }
 
+// logsqlQuote escapes backslashes and double-quotes in a literal string so it
+// can be safely embedded in a LogsQL quoted-string filter: "pattern".
+func logsqlQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
 func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 	for _, pattern := range r.cfg.Detector.FailOpenPatterns {
 		// LogsQL: a quoted string is a substring filter against all streams.
-		query := `"` + pattern + `"`
+		// Escape backslashes and double-quotes in the pattern before interpolation.
+		query := logsqlQuote(pattern)
 		for srcName, client := range r.clients {
 			lines, err := client.Query(ctx, query, start, end, 20)
 			if err != nil || len(lines) == 0 {
