@@ -15,6 +15,7 @@ import (
 	"github.com/JetManiack/log-sentinel/internal/board"
 	"github.com/JetManiack/log-sentinel/internal/config"
 	"github.com/JetManiack/log-sentinel/internal/detector"
+	"github.com/JetManiack/log-sentinel/internal/digest"
 	"github.com/JetManiack/log-sentinel/internal/health"
 	"github.com/JetManiack/log-sentinel/internal/masker"
 	"github.com/JetManiack/log-sentinel/internal/sink"
@@ -98,6 +99,13 @@ func run(ctx context.Context, cfgPath, listenAddr string) error {
 
 	// Poll board threads for /quiet /benign /unquiet commands.
 	go boardClient.PollCommands(ctx, cfg.Commands, db, cfg.Detector.Interval)
+
+	// Daily digest.
+	var digestBoardEmit func(context.Context, string, string)
+	if boardClient != nil {
+		digestBoardEmit = boardClient.EmitDigest
+	}
+	go digest.New(cfg.Digest, db, digestBoardEmit).Run(ctx)
 
 	slog.Info("sentinel started", "version", version)
 

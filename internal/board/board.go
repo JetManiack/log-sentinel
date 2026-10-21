@@ -210,6 +210,22 @@ func (c *Client) replyThread(ctx context.Context, threadID, body string) {
 	}
 }
 
+// EmitDigest posts a daily digest as a new board thread. It is a best-effort
+// call; errors are logged but not returned.
+func (c *Client) EmitDigest(ctx context.Context, title, body string) {
+	if c == nil {
+		return
+	}
+	args := map[string]interface{}{
+		"title": title,
+		"body":  body,
+		"tags":  []string{"log-sentinel", "digest"},
+	}
+	if _, err := c.toolCall(ctx, "create_thread", args); err != nil {
+		slog.Warn("board: emit digest", "err", err)
+	}
+}
+
 func extractThreadID(raw json.RawMessage) string {
 	text := toolText(raw)
 	var m map[string]interface{}

@@ -247,6 +247,40 @@ func (d *DB) FindingSource(fingerprint string) (string, error) {
 	return f.Source, nil
 }
 
+// DigestFinding is a read-only projection used by the daily digest.
+type DigestFinding struct {
+	Fingerprint string
+	RuleID      string
+	Severity    string
+	Source      string
+	LastFiredAt time.Time
+}
+
+// FindingsSince returns all findings that fired at or after since, ordered by
+// severity (critical first) then last_fired_at descending.
+func (d *DB) FindingsSince(since time.Time) ([]DigestFinding, error) {
+	var rows []Finding
+	err := d.g.
+		Select("fingerprint, rule_id, severity, source, last_fired_at").
+		Where("last_fired_at >= ?", since).
+		Order("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, last_fired_at DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DigestFinding, len(rows))
+	for i, r := range rows {
+		out[i] = DigestFinding{
+			Fingerprint: r.Fingerprint,
+			RuleID:      r.RuleID,
+			Severity:    r.Severity,
+			Source:      r.Source,
+			LastFiredAt: r.LastFiredAt,
+		}
+	}
+	return out, nil
+}
+
 // MarkReplyProcessed records that a board reply has been acted on.
 // Returns (true, nil) if this is the first time (caller should process it),
 // (false, nil) if already seen, or (false, err) on DB error.

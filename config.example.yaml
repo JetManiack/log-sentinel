@@ -63,7 +63,7 @@ sinks:
 
 digest:
   time: "19:00"
-  timezone: "UTC"
+  timezone: "Asia/Nicosia"  # IANA timezone; digest skipped if no findings in past 24 h
 
 commands:
   # Board actor nicknames allowed to issue /quiet /benign /unquiet.
