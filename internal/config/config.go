@@ -63,6 +63,11 @@ type LLMConfig struct {
 	StepTimeout time.Duration `yaml:"step_timeout"`
 	// TotalTimeout is the whole-investigation deadline (default 240s).
 	TotalTimeout time.Duration `yaml:"total_timeout"`
+	// ContextWindow is the ±window around the matched event used to fetch
+	// surrounding log lines for the LLM prompt (default 2m).
+	ContextWindow time.Duration `yaml:"context_window"`
+	// ContextLines is the max number of surrounding lines to include (default 20).
+	ContextLines int `yaml:"context_lines"`
 }
 
 // SinksConfig lists the output channels.
@@ -300,6 +305,12 @@ func setDefaults(cfg *Config) {
 	}
 	if l.TotalTimeout == 0 {
 		l.TotalTimeout = 240 * time.Second
+	}
+	if l.ContextWindow == 0 {
+		l.ContextWindow = 2 * time.Minute
+	}
+	if l.ContextLines == 0 {
+		l.ContextLines = 20
 	}
 	if cfg.Digest.Time == "" {
 		cfg.Digest.Time = "19:00"

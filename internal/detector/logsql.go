@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
-
-	"log/slog"
 
 	"github.com/JetManiack/log-sentinel/internal/config"
 	"github.com/JetManiack/log-sentinel/internal/masker"
@@ -48,14 +47,17 @@ func (e *vlEntry) UnmarshalJSON(data []byte) error {
 	}
 	e.Time = raw["_time"]
 	e.Msg = raw["_msg"]
-	e.Tags = raw
-	delete(e.Tags, "_time")
-	delete(e.Tags, "_msg")
+	e.Tags = make(map[string]string, len(raw))
+	for k, v := range raw {
+		if k != "_time" && k != "_msg" {
+			e.Tags[k] = v
+		}
+	}
 	return nil
 }
 
-// Query runs a LogsQL query over [start, end] and returns masked log lines.
-func (c *VLClient) Query(ctx context.Context, query string, start, end time.Time, limit int) ([]string, error) {
+// queryRaw runs a LogsQL query and returns raw entries (with tags).
+func (c *VLClient) queryRaw(ctx context.Context, query string, start, end time.Time, limit int) ([]vlEntry, error) {
 	params := url.Values{
 		"query": {query},
 		"start": {strconv.FormatInt(start.UnixMilli(), 10)},
@@ -82,7 +84,7 @@ func (c *VLClient) Query(ctx context.Context, query string, start, end time.Time
 		return nil, fmt.Errorf("logsql query: HTTP %d: %s", resp.StatusCode, body)
 	}
 
-	var lines []string
+	var entries []vlEntry
 	dec := json.NewDecoder(resp.Body)
 	for dec.More() {
 		var entry vlEntry
@@ -90,10 +92,104 @@ func (c *VLClient) Query(ctx context.Context, query string, start, end time.Time
 			slog.Warn("logsql decode error", "err", err)
 			continue
 		}
-		masked := c.mask.Redact(entry.Msg)
-		lines = append(lines, masked)
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// Query runs a LogsQL query over [start, end] and returns masked log lines.
+func (c *VLClient) Query(ctx context.Context, query string, start, end time.Time, limit int) ([]string, error) {
+	entries, err := c.queryRaw(ctx, query, start, end, limit)
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		lines = append(lines, c.mask.Redact(e.Msg))
 	}
 	return lines, nil
+}
+
+// QueryWithContext runs query over [start, end], returns matched masked lines plus
+// surrounding context lines from the same stream fetched over
+// [firedAt-ctxWindow, firedAt+ctxWindow]. Context lines are masked and deduplicated
+// against the matched lines. Returns (matched, context, error).
+func (c *VLClient) QueryWithContext(
+	ctx context.Context,
+	query string,
+	start, end time.Time,
+	firedAt time.Time,
+	ctxWindow time.Duration,
+	ctxLimit int,
+	limit int,
+) (matched []string, context []string, err error) {
+	entries, err := c.queryRaw(ctx, query, start, end, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil, nil
+	}
+
+	for _, e := range entries {
+		matched = append(matched, c.mask.Redact(e.Msg))
+	}
+
+	// Build a stream selector from the first matched entry's tags.
+	// We use the most specific stable labels: job, namespace, pod (if present).
+	streamSelector := buildStreamSelector(entries[0].Tags)
+	if streamSelector == "" {
+		// No usable labels — skip context fetch.
+		return matched, nil, nil
+	}
+
+	ctxStart := firedAt.Add(-ctxWindow)
+	ctxEnd := firedAt.Add(ctxWindow)
+	ctxEntries, err := c.queryRaw(ctx, streamSelector, ctxStart, ctxEnd, ctxLimit)
+	if err != nil {
+		// Context fetch failure is non-fatal.
+		slog.Warn("logsql context fetch failed", "err", err)
+		return matched, nil, nil
+	}
+
+	// Deduplicate: exclude lines already in matched.
+	matchedSet := make(map[string]struct{}, len(matched))
+	for _, m := range matched {
+		matchedSet[m] = struct{}{}
+	}
+	for _, e := range ctxEntries {
+		line := c.mask.Redact(e.Msg)
+		if _, dup := matchedSet[line]; !dup {
+			context = append(context, line)
+		}
+	}
+	return matched, context, nil
+}
+
+// buildStreamSelector returns a LogsQL stream selector using the most specific
+// stable labels from a VictoriaLogs entry's tag map.
+// Priority: kubernetes_pod_name > kubernetes_namespace > job > (empty).
+func buildStreamSelector(tags map[string]string) string {
+	// Prefer pod-level scope (most specific).
+	if pod, ok := tags["kubernetes_pod_name"]; ok && pod != "" {
+		if ns, ok := tags["kubernetes_namespace_name"]; ok && ns != "" {
+			return fmt.Sprintf(`{kubernetes_namespace_name=%q,kubernetes_pod_name=%q}`, ns, pod)
+		}
+		return fmt.Sprintf(`{kubernetes_pod_name=%q}`, pod)
+	}
+	// Namespace scope.
+	if ns, ok := tags["kubernetes_namespace_name"]; ok && ns != "" {
+		return fmt.Sprintf(`{kubernetes_namespace_name=%q}`, ns)
+	}
+	// Fall back to job label (syslog / host units).
+	if job, ok := tags["job"]; ok && job != "" {
+		return fmt.Sprintf(`{job=%q}`, job)
+	}
+	// Try unit (systemd).
+	if unit, ok := tags["unit"]; ok && unit != "" {
+		return fmt.Sprintf(`{unit=%q}`, unit)
+	}
+	return ""
 }
 
 // Count returns the number of log entries matching query in [start, end].
@@ -104,3 +200,4 @@ func (c *VLClient) Count(ctx context.Context, query string, start, end time.Time
 	}
 	return int64(len(lines)), nil
 }
+

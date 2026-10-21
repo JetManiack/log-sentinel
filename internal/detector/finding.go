@@ -27,8 +27,12 @@ type Finding struct {
 	Source string
 	// Description is the human-readable rule description.
 	Description string
-	// Evidence holds masked log lines or other supporting text.
+	// Evidence holds masked log lines that matched the rule.
 	Evidence []string
+	// ContextLines holds surrounding log lines fetched from the same stream
+	// in a ±window around the event time, for LLM enrichment only.
+	// These are masked but not used for detection decisions.
+	ContextLines []string
 	// FiredAt is when the detector produced this finding.
 	FiredAt time.Time
 }

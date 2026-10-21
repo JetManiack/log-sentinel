@@ -59,12 +59,16 @@ func (r *Runner) poll(ctx context.Context) {
 	for _, rule := range r.cfg.Detector.Rules {
 		clients := r.clientsForRule(rule)
 		for srcName, client := range clients {
-			lines, err := client.Query(ctx, rule.Query, start, now, 50)
+			ctxCfg := r.cfg.LLM
+			matched, ctxLines, err := client.QueryWithContext(
+				ctx, rule.Query, start, now, now,
+				ctxCfg.ContextWindow, ctxCfg.ContextLines, 50,
+			)
 			if err != nil {
 				slog.Warn("detector query failed", "rule", rule.ID, "source", srcName, "err", err)
 				continue
 			}
-			if len(lines) == 0 {
+			if len(matched) == 0 {
 				continue
 			}
 			fp := Fingerprint(rule.ID, srcName, "")
@@ -76,7 +80,7 @@ func (r *Runner) poll(ctx context.Context) {
 			if quiet {
 				continue
 			}
-			if isBenign(lines, r.cfg.Detector.KnownBenign) {
+			if isBenign(matched, r.cfg.Detector.KnownBenign) {
 				slog.Debug("suppressed by known-benign", "rule", rule.ID)
 				continue
 			}
@@ -85,13 +89,14 @@ func (r *Runner) poll(ctx context.Context) {
 				slog.Warn("db upsert error", "err", err)
 			}
 			r.out <- Finding{
-				Fingerprint: fp,
-				RuleID:      rule.ID,
-				Severity:    rule.Severity,
-				Source:      srcName,
-				Description: rule.Description,
-				Evidence:    truncate(lines, 10),
-				FiredAt:     now,
+				Fingerprint:  fp,
+				RuleID:       rule.ID,
+				Severity:     rule.Severity,
+				Source:       srcName,
+				Description:  rule.Description,
+				Evidence:     truncate(matched, 10),
+				ContextLines: truncate(ctxLines, ctxCfg.ContextLines),
+				FiredAt:      now,
 			}
 		}
 	}

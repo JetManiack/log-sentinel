@@ -179,11 +179,18 @@ func (t *Triager) Enrich(ctx context.Context, f detector.Finding, knownBenign []
 
 func buildPrompt(f detector.Finding, benign []config.KnownBenignEntry, m *masker.Mask) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Правило: %s (%s)\nОписание: %s\n\nСобытия:\n",
+	fmt.Fprintf(&sb, "Правило: %s (%s)\nОписание: %s\n\nСовпавшие события:\n",
 		f.RuleID, f.Severity, f.Description)
 	for _, e := range f.Evidence {
 		sb.WriteString(m.Redact(e))
 		sb.WriteByte('\n')
+	}
+	if len(f.ContextLines) > 0 {
+		sb.WriteString("\nОкружающий контекст (строки из того же источника ±2 мин вокруг события):\n")
+		for _, line := range f.ContextLines {
+			sb.WriteString(m.Redact(line))
+			sb.WriteByte('\n')
+		}
 	}
 	if len(benign) > 0 {
 		sb.WriteString("\nИзвестные штатные ситуации (не считать подозрительными):\n")
