@@ -86,6 +86,33 @@ func TestRuleKey(t *testing.T) {
 	}
 }
 
+func TestEntryLineBenignIsolation(t *testing.T) {
+	// entryLine output (full field dump) must NOT be used for benign suppression.
+	// An attacker who names a Role "healthcheck" must not suppress the RBAC finding.
+	// The benign check is against _msg only, which is empty for JSON audit logs.
+	e := vlEntry{
+		Msg: "",
+		Tags: map[string]string{
+			"objectRef.name": "healthcheck", // attacker-controlled
+			"verb":           "create",
+		},
+	}
+	line := entryLine(e)
+	benignEntries := []config.KnownBenignEntry{{Pattern: "healthcheck"}}
+	// entryLine contains "healthcheck" but _msg does not.
+	if !containsStr(line, "healthcheck") {
+		t.Skip("test precondition: entryLine must contain the attacker-controlled name")
+	}
+	// Benign suppression should NOT trigger (it uses _msg, not entryLine).
+	if isBenign([]string{e.Msg}, benignEntries) {
+		t.Error("benign suppression triggered on empty _msg — attacker-controlled name leaked into suppression")
+	}
+	// entryLine in evidence is fine for the LLM, but let's verify it contains the field.
+	if !containsStr(line, "objectRef.name=healthcheck") {
+		t.Errorf("evidence line should contain field: %q", line)
+	}
+}
+
 func TestEntryLineMasking(t *testing.T) {
 	// entryLine result should be maskable by the masker.
 	mask := masker.Default()

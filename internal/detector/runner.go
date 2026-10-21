@@ -87,6 +87,7 @@ func (r *Runner) poll(ctx context.Context) {
 			type group struct {
 				key      string
 				evidence []string
+				msgs     []string // _msg only, used for benign matching
 			}
 			groupMap := map[string]*group{}
 			for _, e := range entries {
@@ -96,8 +97,10 @@ func (r *Runner) poll(ctx context.Context) {
 					g = &group{key: key}
 					groupMap[key] = g
 				}
-				line := client.mask.Redact(entryLine(e))
-				g.evidence = append(g.evidence, line)
+				g.evidence = append(g.evidence, client.mask.Redact(entryLine(e)))
+				// Benign matching uses _msg only: attacker-controlled fields such as
+				// objectRef.name must not influence whether a finding is suppressed.
+				g.msgs = append(g.msgs, client.mask.Redact(e.Msg))
 			}
 
 			// Fetch context lines once per rule/source (uses first entry's stream).
@@ -114,7 +117,10 @@ func (r *Runner) poll(ctx context.Context) {
 			}
 
 			for _, g := range groupMap {
-				if isBenign(g.evidence, r.cfg.Detector.KnownBenign) {
+				// Benign check uses _msg only — not the full field dump — so that
+				// an attacker cannot craft objectRef.name to match a benign pattern
+				// and suppress a real finding.
+				if isBenign(g.msgs, r.cfg.Detector.KnownBenign) {
 					slog.Debug("suppressed by known-benign", "rule", rule.ID)
 					continue
 				}
@@ -131,8 +137,10 @@ func (r *Runner) poll(ctx context.Context) {
 				if err != nil {
 					slog.Warn("db upsert error", "err", err)
 				}
-				// Apply quiet_window_default on first fire (defect #1: was never set).
-				if !existed && r.cfg.Detector.QuietWindowDefault > 0 {
+				// Apply quiet_window_default on first fire, but only when key_fields
+				// are configured. Whole-rule (empty-key) quiet windows would allow a
+				// single event to silence every actor for 24h — an attacker primitive.
+				if !existed && r.cfg.Detector.QuietWindowDefault > 0 && len(rule.KeyFields) > 0 {
 					quietUntil := now.Add(r.cfg.Detector.QuietWindowDefault)
 					if err := r.db.SetQuiet(fp, quietUntil); err != nil {
 						slog.Warn("db setquiet error", "err", err)
@@ -183,7 +191,15 @@ func entryLine(e vlEntry) string {
 // ruleKey computes the fingerprint key component for one log entry.
 // When rule.KeyFields is configured, it hashes the values of those fields
 // from the entry's tags, scoping quiet windows to that actor/object.
-// Falls back to "" (whole-rule scope) when no key_fields are set.
+// Falls back to "" (whole-rule scope) when no key_fields are set; in that
+// case quiet_window_default is intentionally NOT applied (see poll()).
+//
+// Key field selection guidance: prefer fields controlled by the API server
+// (user.username, verb) over fully attacker-controlled target identifiers
+// (objectRef.name). Including target fields is still useful — it makes a new
+// target always produce a fresh finding — but does not confer suppression
+// power to the attacker because quiet windows are only set on first-fire, and
+// a new objectRef.name always produces a distinct fingerprint.
 func ruleKey(rule config.Rule, e vlEntry) string {
 	if len(rule.KeyFields) == 0 {
 		return ""
