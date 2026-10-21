@@ -16,6 +16,9 @@ rules:
   - id: "k8s-exec-attach"
     severity: "high"
     description: "kubectl exec or attach into a running pod"
+    # key_fields scopes quiet windows to the specific user+pod rather than
+    # silencing every exec alert for 24h after the first hit.
+    key_fields: [user.username, objectRef.namespace, objectRef.name]
     # Example: audit events have parsed fields objectRef.subresource and verb.
     # Adjust stream selector to match how your audit log is labelled.
     query: 'objectRef.subresource:exec OR objectRef.subresource:attach verb:create'
@@ -23,11 +26,13 @@ rules:
   - id: "k8s-secrets-read"
     severity: "high"
     description: "Secrets get/list by a non-controller identity"
+    key_fields: [user.username, objectRef.namespace, objectRef.name]
     query: 'objectRef.resource:secrets (verb:get OR verb:list) AND NOT user.username:system:serviceaccount:kube-system* AND NOT user.username:system:controller:*'
 
   - id: "k8s-rbac-write"
     severity: "high"
     description: "RBAC ClusterRole or RoleBinding created or modified"
+    key_fields: [user.username, objectRef.namespace, objectRef.name]
     query: '(objectRef.resource:clusterroles OR objectRef.resource:clusterrolebindings OR objectRef.resource:rolebindings) (verb:create OR verb:update OR verb:patch OR verb:delete)'
 
   - id: "k8s-image-digest-change"

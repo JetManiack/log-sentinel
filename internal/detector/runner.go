@@ -2,8 +2,10 @@ package detector
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,10 +68,7 @@ func (r *Runner) poll(ctx context.Context) {
 		clients := r.clientsForRule(rule)
 		for srcName, client := range clients {
 			ctxCfg := r.cfg.LLM
-			matched, ctxLines, err := client.QueryWithContext(
-				ctx, rule.Query, start, now, now,
-				ctxCfg.ContextWindow, ctxCfg.ContextLines, 50,
-			)
+			entries, err := client.queryRaw(ctx, rule.Query, start, now, 50)
 			if err != nil {
 				// Fail loud: a broken rule query must be visible as a finding,
 				// not a silent warn. An operator watching stdout or the board
@@ -79,35 +78,76 @@ func (r *Runner) poll(ctx context.Context) {
 				r.emitDetectorError(ctx, rule, srcName, err)
 				continue
 			}
-			if len(matched) == 0 {
+			if len(entries) == 0 {
 				continue
 			}
-			fp := Fingerprint(rule.ID, srcName, "")
-			quiet, err := r.db.IsQuiet(fp)
-			if err != nil {
-				slog.Warn("db isquiet error", "err", err)
-				continue
+
+			// Build per-entry fingerprint key from key_fields (defect #2: whole-rule
+			// silencing was an attacker primitive). Group entries by key.
+			type group struct {
+				key      string
+				evidence []string
 			}
-			if quiet {
-				continue
+			groupMap := map[string]*group{}
+			for _, e := range entries {
+				key := ruleKey(rule, e)
+				g, ok := groupMap[key]
+				if !ok {
+					g = &group{key: key}
+					groupMap[key] = g
+				}
+				line := client.mask.Redact(entryLine(e))
+				g.evidence = append(g.evidence, line)
 			}
-			if isBenign(matched, r.cfg.Detector.KnownBenign) {
-				slog.Debug("suppressed by known-benign", "rule", rule.ID)
-				continue
+
+			// Fetch context lines once per rule/source (uses first entry's stream).
+			var ctxLines []string
+			if streamSelector := buildStreamSelector(entries[0].Tags); streamSelector != "" {
+				ctxStart := now.Add(-ctxCfg.ContextWindow)
+				ctxEnd := now.Add(ctxCfg.ContextWindow)
+				ctxEntries, ctxErr := client.queryRaw(ctx, streamSelector, ctxStart, ctxEnd, ctxCfg.ContextLines)
+				if ctxErr == nil {
+					for _, ce := range ctxEntries {
+						ctxLines = append(ctxLines, client.mask.Redact(entryLine(ce)))
+					}
+				}
 			}
-			_, err = r.db.Upsert(fp, rule.ID, rule.Severity, srcName)
-			if err != nil {
-				slog.Warn("db upsert error", "err", err)
-			}
-			r.out <- Finding{
-				Fingerprint:  fp,
-				RuleID:       rule.ID,
-				Severity:     rule.Severity,
-				Source:       srcName,
-				Description:  rule.Description,
-				Evidence:     truncate(matched, 10),
-				ContextLines: truncate(ctxLines, ctxCfg.ContextLines),
-				FiredAt:      now,
+
+			for _, g := range groupMap {
+				if isBenign(g.evidence, r.cfg.Detector.KnownBenign) {
+					slog.Debug("suppressed by known-benign", "rule", rule.ID)
+					continue
+				}
+				fp := Fingerprint(rule.ID, srcName, g.key)
+				quiet, err := r.db.IsQuiet(fp)
+				if err != nil {
+					slog.Warn("db isquiet error", "err", err)
+					continue
+				}
+				if quiet {
+					continue
+				}
+				existed, err := r.db.Upsert(fp, rule.ID, rule.Severity, srcName)
+				if err != nil {
+					slog.Warn("db upsert error", "err", err)
+				}
+				// Apply quiet_window_default on first fire (defect #1: was never set).
+				if !existed && r.cfg.Detector.QuietWindowDefault > 0 {
+					quietUntil := now.Add(r.cfg.Detector.QuietWindowDefault)
+					if err := r.db.SetQuiet(fp, quietUntil); err != nil {
+						slog.Warn("db setquiet error", "err", err)
+					}
+				}
+				r.out <- Finding{
+					Fingerprint:  fp,
+					RuleID:       rule.ID,
+					Severity:     rule.Severity,
+					Source:       srcName,
+					Description:  rule.Description,
+					Evidence:     truncate(g.evidence, 10),
+					ContextLines: truncate(ctxLines, ctxCfg.ContextLines),
+					FiredAt:      now,
+				}
 			}
 		}
 	}
@@ -116,6 +156,43 @@ func (r *Runner) poll(ctx context.Context) {
 	if len(r.cfg.Detector.FailOpenPatterns) > 0 {
 		r.scanFailOpen(ctx, start, now)
 	}
+}
+
+// entryLine returns the best human-readable representation of a log entry.
+// When _msg is empty (structured JSON audit logs), it serialises all non-stream
+// fields as key=value pairs (defect #3: LLM received "missing _msg field").
+func entryLine(e vlEntry) string {
+	if e.Msg != "" {
+		return e.Msg
+	}
+	// Build sorted key=value string from all non-_stream* tags.
+	keys := make([]string, 0, len(e.Tags))
+	for k := range e.Tags {
+		if !strings.HasPrefix(k, "_stream") {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+e.Tags[k])
+	}
+	return strings.Join(parts, " ")
+}
+
+// ruleKey computes the fingerprint key component for one log entry.
+// When rule.KeyFields is configured, it hashes the values of those fields
+// from the entry's tags, scoping quiet windows to that actor/object.
+// Falls back to "" (whole-rule scope) when no key_fields are set.
+func ruleKey(rule config.Rule, e vlEntry) string {
+	if len(rule.KeyFields) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, field := range rule.KeyFields {
+		fmt.Fprintf(h, "%s=%s\x00", field, e.Tags[field])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
 }
 
 // logsqlQuote escapes backslashes and double-quotes in a literal string so it

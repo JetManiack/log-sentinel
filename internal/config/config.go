@@ -136,6 +136,12 @@ type Rule struct {
 	Description string `yaml:"description"`
 	// Source names the LogSource(s) this rule applies to (empty = all).
 	Source string `yaml:"source"`
+	// KeyFields are VictoriaLogs field names whose values are hashed into the
+	// fingerprint key. This scopes quiet windows to a specific actor/object
+	// combination rather than silencing the whole rule.
+	// Example: [user.username, objectRef.namespace, objectRef.name]
+	// Falls back to the empty string (whole-rule scope) when not set.
+	KeyFields []string `yaml:"key_fields"`
 }
 
 // KnownBenignEntry is a log-pattern + reason that suppresses notifications.

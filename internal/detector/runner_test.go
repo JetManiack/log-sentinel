@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/JetManiack/log-sentinel/internal/config"
+	"github.com/JetManiack/log-sentinel/internal/masker"
 )
 
 func TestIsBenign(t *testing.T) {
@@ -38,6 +39,63 @@ func TestLogsqlQuote(t *testing.T) {
 		if got != c.want {
 			t.Errorf("logsqlQuote(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestEntryLine(t *testing.T) {
+	// When _msg is non-empty, it is returned verbatim.
+	e := vlEntry{Msg: "hello world", Tags: map[string]string{"job": "sshd"}}
+	if got := entryLine(e); got != "hello world" {
+		t.Errorf("want %q, got %q", "hello world", got)
+	}
+
+	// When _msg is empty (structured audit log), field=value pairs are returned.
+	e2 := vlEntry{Msg: "", Tags: map[string]string{
+		"verb":          "create",
+		"user.username": "admin",
+		"_streamLabels": "ignore",
+	}}
+	got2 := entryLine(e2)
+	if containsStr(got2, "_stream") {
+		t.Errorf("_stream* fields must be excluded: %q", got2)
+	}
+	if !containsStr(got2, "user.username=admin") || !containsStr(got2, "verb=create") {
+		t.Errorf("expected field pairs in output: %q", got2)
+	}
+}
+
+func TestRuleKey(t *testing.T) {
+	rule := config.Rule{ID: "r", KeyFields: []string{"user.username", "objectRef.name"}}
+	e := vlEntry{Tags: map[string]string{"user.username": "alice", "objectRef.name": "role-x"}}
+
+	k1 := ruleKey(rule, e)
+	if k1 == "" {
+		t.Fatal("expected non-empty key with key_fields set")
+	}
+
+	// Different user → different key.
+	e2 := vlEntry{Tags: map[string]string{"user.username": "bob", "objectRef.name": "role-x"}}
+	if ruleKey(rule, e2) == k1 {
+		t.Error("different user.username must produce different key")
+	}
+
+	// No key_fields → empty key (whole-rule scope).
+	ruleNoFields := config.Rule{ID: "r"}
+	if ruleKey(ruleNoFields, e) != "" {
+		t.Error("rule without key_fields must return empty key")
+	}
+}
+
+func TestEntryLineMasking(t *testing.T) {
+	// entryLine result should be maskable by the masker.
+	mask := masker.Default()
+	e := vlEntry{Msg: "", Tags: map[string]string{
+		"authorization": "Bearer sk-supersecretkey1234567890abcdef",
+	}}
+	line := entryLine(e)
+	masked := mask.Redact(line)
+	if containsStr(masked, "sk-supersecretkey") {
+		t.Errorf("secret not masked: %q", masked)
 	}
 }
 
