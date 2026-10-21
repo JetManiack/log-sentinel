@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -154,7 +155,8 @@ type CommandsConfig struct {
 	MaxAgentBenignDays int `yaml:"max_agent_benign_days"`
 }
 
-// Load reads and parses the YAML config at path.
+// Load reads and parses the YAML config at path, then merges any rules from
+// detector.rules_dir (directory-file rules never override inline rules).
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -165,7 +167,53 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	setDefaults(&cfg)
+	if cfg.Detector.RulesDir != "" {
+		if err := loadRulesDir(&cfg); err != nil {
+			return nil, err
+		}
+	}
 	return &cfg, nil
+}
+
+// ruleFile is the top-level structure expected in each *.yaml under rules_dir.
+type ruleFile struct {
+	Rules []Rule `yaml:"rules"`
+}
+
+// loadRulesDir globs cfg.Detector.RulesDir for *.yaml files, parses each, and
+// appends their rules to cfg.Detector.Rules, skipping IDs already defined inline.
+func loadRulesDir(cfg *Config) error {
+	dir := cfg.Detector.RulesDir
+	// Build a set of IDs already defined inline so they take precedence.
+	inlineIDs := make(map[string]struct{}, len(cfg.Detector.Rules))
+	for _, r := range cfg.Detector.Rules {
+		inlineIDs[r.ID] = struct{}{}
+	}
+
+	pattern := filepath.Join(dir, "*.yaml")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("config: rules_dir glob %s: %w", pattern, err)
+	}
+
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("config: rules_dir read %s: %w", path, err)
+		}
+		var rf ruleFile
+		if err := yaml.Unmarshal(data, &rf); err != nil {
+			return fmt.Errorf("config: rules_dir parse %s: %w", path, err)
+		}
+		for _, r := range rf.Rules {
+			if _, exists := inlineIDs[r.ID]; exists {
+				continue
+			}
+			cfg.Detector.Rules = append(cfg.Detector.Rules, r)
+			inlineIDs[r.ID] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func setDefaults(cfg *Config) {
