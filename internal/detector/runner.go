@@ -120,7 +120,8 @@ func (r *Runner) poll(ctx context.Context) {
 
 func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 	for _, pattern := range r.cfg.Detector.FailOpenPatterns {
-		query := `{job=~".+"} |= "` + pattern + `"`
+		// LogsQL: a quoted string is a substring filter against all streams.
+		query := `"` + pattern + `"`
 		for srcName, client := range r.clients {
 			lines, err := client.Query(ctx, query, start, end, 20)
 			if err != nil || len(lines) == 0 {
