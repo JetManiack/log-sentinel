@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,26 +18,26 @@ import (
 	"github.com/JetManiack/log-sentinel/internal/config"
 	"github.com/JetManiack/log-sentinel/internal/detector"
 	"github.com/JetManiack/log-sentinel/internal/masker"
+	"github.com/JetManiack/log-sentinel/internal/prompt"
 	"github.com/JetManiack/log-sentinel/internal/sink"
 )
 
-const systemPrompt = `Ты — security-аналитик, получаешь подозрительное событие из логов.
-Проанализируй и верни compact single-line JSON без пробелов между полями:
-{"severity":"low|medium|high|critical","what_happened_ru":"...","impact_ru":"...","evidence":["..."],"likely_benign_reason":"...","recommended_check_ru":"...","confidence":0.0}
-Поля likely_benign_reason и recommended_check_ru — опциональные, оставь пустыми если неприменимо.
-Severity не может быть ниже той, что определил детектор.
-Если не хватает данных — честно укажи.`
-
 // Triager calls the LLM for enrichment.
 type Triager struct {
-	cfg    config.LLMConfig
-	mask   *masker.Mask
-	client *http.Client
+	cfg     config.LLMConfig
+	mask    *masker.Mask
+	client  *http.Client
+	prompts *prompt.Manager
 }
 
 // New creates a Triager. Returns nil if LLM is disabled.
 func New(cfg config.LLMConfig, m *masker.Mask) *Triager {
 	if !cfg.Enabled {
+		return nil
+	}
+	mgr, err := prompt.New(cfg.PromptsDir)
+	if err != nil {
+		slog.Error("triage: failed to load prompt blueprints", "err", err)
 		return nil
 	}
 	return &Triager{
@@ -47,6 +46,7 @@ func New(cfg config.LLMConfig, m *masker.Mask) *Triager {
 		client: &http.Client{
 			Timeout: cfg.TotalTimeout + 10*time.Second,
 		},
+		prompts: mgr,
 	}
 }
 
@@ -97,12 +97,16 @@ func (t *Triager) Enrich(ctx context.Context, f detector.Finding, knownBenign []
 	ctx, cancel := context.WithTimeout(ctx, t.cfg.TotalTimeout)
 	defer cancel()
 
-	userContent := buildPrompt(f, knownBenign, t.mask)
+	systemContent, userContent, err := buildPrompt(t.prompts, t.mask, f, knownBenign, t.cfg.ContextWindow)
+	if err != nil {
+		slog.Warn("triage: build prompt", "err", err)
+		return nil
+	}
 
 	reqBody := oaiRequest{
 		Model: t.cfg.Model,
 		Messages: []oaiMessage{
-			{Role: "system", Content: systemPrompt},
+			{Role: "system", Content: systemContent},
 			{Role: "user", Content: userContent},
 		},
 		MaxTokens:   t.cfg.MaxTokensFinal,
@@ -177,28 +181,43 @@ func (t *Triager) Enrich(ctx context.Context, f detector.Finding, knownBenign []
 	}
 }
 
-func buildPrompt(f detector.Finding, benign []config.KnownBenignEntry, m *masker.Mask) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Правило: %s (%s)\nОписание: %s\n\nСовпавшие события:\n",
-		f.RuleID, f.Severity, f.Description)
-	for _, e := range f.Evidence {
-		sb.WriteString(m.Redact(e))
-		sb.WriteByte('\n')
+// triageData is the template data struct passed to the triage blueprint.
+type triageData struct {
+	RuleID               string
+	Severity             string
+	Description          string
+	Evidence             []string
+	ContextLines         []string
+	ContextWindowMinutes int
+	KnownBenign          []config.KnownBenignEntry
+}
+
+func buildPrompt(
+	mgr *prompt.Manager,
+	m *masker.Mask,
+	f detector.Finding,
+	benign []config.KnownBenignEntry,
+	ctxWindow time.Duration,
+) (system, user string, err error) {
+	// Mask evidence and context before passing to the LLM.
+	evidence := make([]string, len(f.Evidence))
+	for i, e := range f.Evidence {
+		evidence[i] = m.Redact(e)
 	}
-	if len(f.ContextLines) > 0 {
-		sb.WriteString("\nОкружающий контекст (строки из того же источника ±2 мин вокруг события):\n")
-		for _, line := range f.ContextLines {
-			sb.WriteString(m.Redact(line))
-			sb.WriteByte('\n')
-		}
+	ctxLines := make([]string, len(f.ContextLines))
+	for i, l := range f.ContextLines {
+		ctxLines[i] = m.Redact(l)
 	}
-	if len(benign) > 0 {
-		sb.WriteString("\nИзвестные штатные ситуации (не считать подозрительными):\n")
-		for _, b := range benign {
-			fmt.Fprintf(&sb, "- %s: %s\n", b.Pattern, b.Reason)
-		}
+	data := triageData{
+		RuleID:               f.RuleID,
+		Severity:             f.Severity,
+		Description:          f.Description,
+		Evidence:             evidence,
+		ContextLines:         ctxLines,
+		ContextWindowMinutes: int(ctxWindow.Minutes()),
+		KnownBenign:          benign,
 	}
-	return sb.String()
+	return mgr.Execute("triage", data)
 }
 
 var severityOrder = map[string]int{

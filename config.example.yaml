@@ -46,6 +46,12 @@ llm:
   max_tokens_final: 1200
   step_timeout: 60s
   total_timeout: 240s
+  # Context window fetched around each matched event for LLM enrichment.
+  context_window: 2m
+  context_lines: 20
+  # Override directory for prompt YAML blueprints (optional).
+  # Files here replace built-in prompts by their `name` field.
+  # prompts_dir: "prompts.d"
 
 sinks:
   stdout_json: true  # always-on; vlagent picks up these lines

@@ -68,6 +68,9 @@ type LLMConfig struct {
 	ContextWindow time.Duration `yaml:"context_window"`
 	// ContextLines is the max number of surrounding lines to include (default 20).
 	ContextLines int `yaml:"context_lines"`
+	// PromptsDir is an optional directory of YAML blueprint overrides.
+	// Files here replace built-in prompts by their `name` field.
+	PromptsDir string `yaml:"prompts_dir"`
 }
 
 // SinksConfig lists the output channels.
