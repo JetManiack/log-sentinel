@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -15,10 +16,11 @@ import (
 
 // Finding records a fired detector finding for dedup / quiet-window tracking.
 type Finding struct {
-	ID          uint      `gorm:"primarykey"`
-	Fingerprint string    `gorm:"uniqueIndex;not null"`
-	Severity    string    `gorm:"not null"`
-	RuleID      string    `gorm:"not null"`
+	ID           uint      `gorm:"primarykey"`
+	Fingerprint  string    `gorm:"uniqueIndex;not null"`
+	Severity     string    `gorm:"not null"`
+	RuleID       string    `gorm:"not null"`
+	Source       string    `gorm:"not null"`
 	FirstFiredAt time.Time `gorm:"not null"`
 	LastFiredAt  time.Time `gorm:"not null"`
 	QuietUntil   time.Time `gorm:"index"`
@@ -61,6 +63,13 @@ type TemplateBaseline struct {
 	LastSeen  time.Time `gorm:"not null"`
 }
 
+// ProcessedReply records board reply IDs that have already been acted on,
+// so commands are not replayed across sentinel restarts.
+type ProcessedReply struct {
+	ID      uint   `gorm:"primarykey"`
+	ReplyID string `gorm:"uniqueIndex;not null"`
+}
+
 // DB wraps a gorm.DB with sentinel-specific helpers.
 type DB struct {
 	g *gorm.DB
@@ -83,6 +92,7 @@ func Open(dsn string) (*DB, error) {
 		&BenignOverride{},
 		&DNSBaseline{},
 		&TemplateBaseline{},
+		&ProcessedReply{},
 	); err != nil {
 		return nil, fmt.Errorf("state: migrate: %w", err)
 	}
@@ -104,7 +114,7 @@ func (d *DB) IsQuiet(fingerprint string) (bool, error) {
 
 // Upsert creates or updates the Finding record for fingerprint, returning whether
 // it already existed (true = existing, fire is a repeat).
-func (d *DB) Upsert(fingerprint, ruleID, severity string) (existed bool, err error) {
+func (d *DB) Upsert(fingerprint, ruleID, severity, source string) (existed bool, err error) {
 	var f Finding
 	err = d.g.Where("fingerprint = ?", fingerprint).First(&f).Error
 	if err == gorm.ErrRecordNotFound {
@@ -112,6 +122,7 @@ func (d *DB) Upsert(fingerprint, ruleID, severity string) (existed bool, err err
 			Fingerprint:  fingerprint,
 			RuleID:       ruleID,
 			Severity:     severity,
+			Source:       source,
 			FirstFiredAt: time.Now(),
 			LastFiredAt:  time.Now(),
 		}
@@ -224,4 +235,29 @@ func (d *DB) FindingRuleID(fingerprint string) (string, error) {
 		return "", err
 	}
 	return f.RuleID, nil
+}
+
+// FindingSource returns the log source name stored for a fingerprint.
+func (d *DB) FindingSource(fingerprint string) (string, error) {
+	var f Finding
+	err := d.g.Select("source").Where("fingerprint = ?", fingerprint).First(&f).Error
+	if err != nil {
+		return "", err
+	}
+	return f.Source, nil
+}
+
+// MarkReplyProcessed records that a board reply has been acted on.
+// Returns (true, nil) if this is the first time (caller should process it),
+// (false, nil) if already seen, or (false, err) on DB error.
+func (d *DB) MarkReplyProcessed(replyID string) (bool, error) {
+	result := d.g.Create(&ProcessedReply{ReplyID: replyID})
+	if result.Error != nil {
+		// SQLite unique-constraint violation means already processed.
+		if strings.Contains(result.Error.Error(), "UNIQUE constraint failed") {
+			return false, nil
+		}
+		return false, result.Error
+	}
+	return true, nil
 }

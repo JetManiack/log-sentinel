@@ -80,7 +80,7 @@ func (r *Runner) poll(ctx context.Context) {
 				slog.Debug("suppressed by known-benign", "rule", rule.ID)
 				continue
 			}
-			_, err = r.db.Upsert(fp, rule.ID, rule.Severity)
+			_, err = r.db.Upsert(fp, rule.ID, rule.Severity, srcName)
 			if err != nil {
 				slog.Warn("db upsert error", "err", err)
 			}
@@ -118,7 +118,7 @@ func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 			if isBenign(lines, r.cfg.Detector.KnownBenign) {
 				continue
 			}
-			r.db.Upsert(fp, "fail-open", SeverityMedium) //nolint:errcheck
+			r.db.Upsert(fp, "fail-open", SeverityMedium, srcName) //nolint:errcheck
 			r.out <- Finding{
 				Fingerprint: fp,
 				RuleID:      "fail-open",
