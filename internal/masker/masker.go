@@ -26,12 +26,21 @@ var defaultPatterns = []*regexp.Regexp{
 	// including session tokens, cookies, and custom auth headers. Value-pattern
 	// masking cannot cover all possible env var values (mixed-case alnum cookies,
 	// UUIDs, proxy headers with spaces), so we drop the entire ENV block.
+	// Note: long env dumps are split into "(command continued)" journal entries,
+	// so this pattern only fires when both endpoints appear on the same line.
 	regexp.MustCompile(`(ENV=)[^;]+?(; COMMAND=)`),
 
-	// Any env variable whose name contains a sensitive keyword, whatever value
-	// charset (covers SNAP_COOKIE, SNAP_CONTEXT, CLAUDE_CODE_SESSION_ID, etc.).
-	// Matches up to the next space, semicolon, or end of string.
-	regexp.MustCompile(`(?i)([A-Z0-9_]*(?:KEY|TOKEN|COOKIE|SECRET|SESSION|PASSWORD|AUTH|HEADERS|CONTEXT)[A-Z0-9_]*=['\"]?)[^\s;]+`),
+	// sudo "(command continued)" lines: the entire content after the marker is
+	// an env dump continuation and must be redacted wholesale.
+	regexp.MustCompile(`(\(command continued\) ?\S* ?)[^\x00]+`),
+
+	// Any env variable whose name contains a sensitive keyword.
+	// Masks the value up to " ; " (sudo separator) or end of string.
+	// This is intentionally greedy so multi-word header values are fully covered
+	// (e.g. ANTHROPIC_CUSTOM_HEADERS=proxy_key: <uuid> X-Header: <val>).
+	// Re2 does not support lookahead, so we use [^;]* and trim " ; " in the
+	// replacement logic: the capture group prefix is kept, the value is replaced.
+	regexp.MustCompile(`(?i)([A-Z0-9_]*(?:KEY|TOKEN|COOKIE|SECRET|SESSION|PASSWORD|AUTH|HEADERS|CONTEXT)[A-Z0-9_]*=['\"]?)[^;]+`),
 
 	// sk- prefixed keys (LiteLLM, OpenAI)
 	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),

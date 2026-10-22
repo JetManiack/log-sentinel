@@ -51,6 +51,17 @@ func TestRedact(t *testing.T) {
 			input:      "ENV=ANTHROPIC_CUSTOM_HEADERS=proxy_key: sk-pr-test1234 OTHER=x ; COMMAND=/bin/sh",
 			mustAbsent: "proxy_key",
 		},
+		// Real sudo format: header value with spaces followed by another header.
+		// The UUID after the space must not leak.
+		{
+			input:      "ANTHROPIC_CUSTOM_HEADERS=proxy_key: 12345678-1234-1234-1234-123456789abc X-IntelliJ-Proxy-Agent-ID: deadbeef-dead-beef-dead-beefdeadbeef",
+			mustAbsent: "12345678-1234-1234-1234-123456789abc",
+		},
+		// sudo "(command continued)" line — everything after the marker is env dump.
+		{
+			input:      "(command continued) ANTHROPIC_API_KEY=sk-pr-00000000-0000-0000-0000-000000000000 SNAP_COOKIE=AbCdEfGhIjKlMnOpQrStUvWxYz ; COMMAND=/usr/bin/true",
+			mustAbsent: "sk-pr-00000000-0000-0000-0000-000000000000",
+		},
 	}
 
 	for _, c := range cases {
