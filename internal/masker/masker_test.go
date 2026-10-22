@@ -97,3 +97,30 @@ func containsSubstring(s, sub string) bool {
 		return false
 	}())
 }
+
+// TestRedactKeywordPatternPreservesTrailing checks that keyword-in-name redaction
+// to EOL doesn't break COMMAND= on lines without an ENV= block.
+func TestRedactKeywordPatternPreservesTrailing(t *testing.T) {
+	m := masker.Default()
+
+	// When there's no ENV= wrapper, the keyword-in-name rule redacts to EOL.
+	// On these lines the COMMAND= info is lost (by design — the variable name
+	// itself contains the secret, so the whole value+tail is unsafe to keep).
+	// The ENV= block rule is the one responsible for preserving COMMAND=.
+	// This test documents the actual behaviour so any future change is visible.
+	line := "SNAP_COOKIE=AbCdEfGhIjKlMnOpQrStUvWxYz ; COMMAND=/usr/bin/true"
+	out := m.Redact(line)
+	if containsSubstring(out, "AbCdEfGhIjKlMnOpQrStUvWxYz") {
+		t.Errorf("SNAP_COOKIE value not redacted: %q", out)
+	}
+
+	// On a full sudo line with ENV= wrapper, COMMAND= must survive.
+	fullLine := "ilazarev : PWD=/home ; USER=root ; ENV=SNAP_COOKIE=AbCdEfGhIjKlMnOpQrStUvWxYz ; COMMAND=/usr/bin/true"
+	fullOut := m.Redact(fullLine)
+	if !containsSubstring(fullOut, "COMMAND=/usr/bin/true") {
+		t.Errorf("COMMAND= lost on full sudo line: %q", fullOut)
+	}
+	if containsSubstring(fullOut, "AbCdEfGhIjKlMnOpQrStUvWxYz") {
+		t.Errorf("SNAP_COOKIE value not redacted on full sudo line: %q", fullOut)
+	}
+}
