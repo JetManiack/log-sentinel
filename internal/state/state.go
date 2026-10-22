@@ -70,6 +70,17 @@ type ProcessedReply struct {
 	ReplyID string `gorm:"uniqueIndex;not null"`
 }
 
+// PollHighWater tracks the end timestamp of the last successful poll per
+// (rule_id, source_name). Used to implement poll overlap: the next poll
+// queries [last_end - overlap, now] so events that arrived after the
+// previous poll window closed are never missed.
+type PollHighWater struct {
+	ID         uint      `gorm:"primarykey"`
+	RuleID     string    `gorm:"uniqueIndex:idx_hwm;not null"`
+	SourceName string    `gorm:"uniqueIndex:idx_hwm;not null"`
+	LastEnd    time.Time `gorm:"not null"`
+}
+
 // DB wraps a gorm.DB with sentinel-specific helpers.
 type DB struct {
 	g *gorm.DB
@@ -93,6 +104,7 @@ func Open(dsn string) (*DB, error) {
 		&DNSBaseline{},
 		&TemplateBaseline{},
 		&ProcessedReply{},
+		&PollHighWater{},
 	); err != nil {
 		return nil, fmt.Errorf("state: migrate: %w", err)
 	}
@@ -279,6 +291,31 @@ func (d *DB) FindingsSince(since time.Time) ([]DigestFinding, error) {
 		}
 	}
 	return out, nil
+}
+
+// PollStart returns the start time for the next poll of (ruleID, sourceName).
+// It is max(lastEnd - overlap, fallback), where fallback = now - interval.
+// On first call (no record) it returns fallback.
+func (d *DB) PollStart(ruleID, sourceName string, interval, overlap time.Duration) time.Time {
+	var hw PollHighWater
+	err := d.g.Where("rule_id = ? AND source_name = ?", ruleID, sourceName).First(&hw).Error
+	fallback := time.Now().Add(-interval)
+	if err != nil {
+		return fallback
+	}
+	start := hw.LastEnd.Add(-overlap)
+	if start.Before(fallback) {
+		return fallback
+	}
+	return start
+}
+
+// SetPollEnd records that a poll for (ruleID, sourceName) ended at end.
+func (d *DB) SetPollEnd(ruleID, sourceName string, end time.Time) error {
+	hw := PollHighWater{RuleID: ruleID, SourceName: sourceName, LastEnd: end}
+	return d.g.Where(PollHighWater{RuleID: ruleID, SourceName: sourceName}).
+		Assign(PollHighWater{LastEnd: end}).
+		FirstOrCreate(&hw).Error
 }
 
 // MarkReplyProcessed records that a board reply has been acted on.

@@ -30,6 +30,19 @@ func TestRedact(t *testing.T) {
 			input:      "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
 			mustAbsent: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
 		},
+		// sudo journal env dump: bare hex session tokens (no Bearer prefix)
+		{
+			input:      "USER=root ; COMMAND=/usr/bin/true ; ENV=CLAUDE_CODE_MESSAGING_TOKEN=aabbccddeeff00112233445566778899 OTHER=x",
+			mustAbsent: "aabbccddeeff00112233445566778899",
+		},
+		{
+			input:      "SNAP_COOKIE=deadbeef01234567deadbeef01234567 PATH=/usr/bin",
+			mustAbsent: "deadbeef01234567deadbeef01234567",
+		},
+		{
+			input:      "SESSION=0123456789abcdef0123456789abcdef ; SHELL=/bin/bash",
+			mustAbsent: "0123456789abcdef0123456789abcdef",
+		},
 	}
 
 	for _, c := range cases {

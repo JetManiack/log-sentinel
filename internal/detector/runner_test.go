@@ -43,14 +43,15 @@ func TestLogsqlQuote(t *testing.T) {
 }
 
 func TestEntryLine(t *testing.T) {
-	// When _msg is non-empty, it is returned verbatim.
-	e := vlEntry{Msg: "hello world", Tags: map[string]string{"job": "sshd"}}
-	if got := entryLine(e); got != "hello world" {
-		t.Errorf("want %q, got %q", "hello world", got)
+	// When _msg is non-empty, it is returned with the timestamp prefix.
+	e := vlEntry{Time: "2026-01-01T00:00:00Z", Msg: "hello world", Tags: map[string]string{"job": "sshd"}}
+	got := entryLine(e)
+	if !containsStr(got, "hello world") || !containsStr(got, "2026-01-01T00:00:00Z") {
+		t.Errorf("want timestamp+msg, got %q", got)
 	}
 
 	// When _msg is empty (structured audit log), field=value pairs are returned.
-	e2 := vlEntry{Msg: "", Tags: map[string]string{
+	e2 := vlEntry{Time: "2026-01-01T00:00:01Z", Msg: "", Tags: map[string]string{
 		"verb":          "create",
 		"user.username": "admin",
 		"_streamLabels": "ignore",
@@ -61,6 +62,9 @@ func TestEntryLine(t *testing.T) {
 	}
 	if !containsStr(got2, "user.username=admin") || !containsStr(got2, "verb=create") {
 		t.Errorf("expected field pairs in output: %q", got2)
+	}
+	if !containsStr(got2, "2026-01-01T00:00:01Z") {
+		t.Errorf("expected timestamp prefix: %q", got2)
 	}
 }
 
@@ -79,10 +83,21 @@ func TestRuleKey(t *testing.T) {
 		t.Error("different user.username must produce different key")
 	}
 
-	// No key_fields → empty key (whole-rule scope).
+	// No key_fields → hash of _msg (fail-safe, not empty).
 	ruleNoFields := config.Rule{ID: "r"}
-	if ruleKey(ruleNoFields, e) != "" {
-		t.Error("rule without key_fields must return empty key")
+	eMsg1 := vlEntry{Msg: "failed password for alice"}
+	eMsg2 := vlEntry{Msg: "failed password for alice"}
+	eMsg3 := vlEntry{Msg: "failed password for bob"}
+
+	k2 := ruleKey(ruleNoFields, eMsg1)
+	if k2 == "" {
+		t.Error("rule without key_fields must return non-empty key (msg hash)")
+	}
+	if ruleKey(ruleNoFields, eMsg2) != k2 {
+		t.Error("identical _msg must produce identical key")
+	}
+	if ruleKey(ruleNoFields, eMsg3) == k2 {
+		t.Error("different _msg must produce different key")
 	}
 }
 

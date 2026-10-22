@@ -59,14 +59,20 @@ func (r *Runner) Run(ctx context.Context) {
 	}
 }
 
+// pollOverlap is subtracted from the previous poll end to catch events that
+// arrived in VictoriaLogs after the previous poll window closed (vlagent batch lag).
+const pollOverlap = 5 * time.Second
+
 func (r *Runner) poll(ctx context.Context) {
 	now := time.Now()
-	window := time.Duration(r.cfg.Detector.Interval)
-	start := now.Add(-window)
+	interval := r.cfg.Detector.Interval
 
 	for _, rule := range r.cfg.Detector.Rules {
 		clients := r.clientsForRule(rule)
 		for srcName, client := range clients {
+			// Use a per-(rule,source) high-water mark so events near the poll
+			// boundary are never dropped (defect #3: gap between polls).
+			start := r.db.PollStart(rule.ID, srcName, interval, pollOverlap)
 			ctxCfg := r.cfg.LLM
 			entries, err := client.queryRaw(ctx, rule.Query, start, now, 50)
 			if err != nil {
@@ -78,12 +84,23 @@ func (r *Runner) poll(ctx context.Context) {
 				r.emitDetectorError(ctx, rule, srcName, err)
 				continue
 			}
+			// Always advance the high-water mark, even on empty results.
+			if err := r.db.SetPollEnd(rule.ID, srcName, now); err != nil {
+				slog.Warn("db setpollend error", "err", err)
+			}
 			if len(entries) == 0 {
 				continue
 			}
 
-			// Build per-entry fingerprint key from key_fields (defect #2: whole-rule
-			// silencing was an attacker primitive). Group entries by key.
+			// Sort entries by _time ascending so evidence is chronological and the
+			// LLM sees events in the correct order (VL does not guarantee order).
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Time < entries[j].Time
+			})
+
+			// Group entries by fingerprint key. key_fields → per-actor/object scope;
+			// no key_fields → hash of _msg (fail-safe: unique events don't dedup,
+			// identical events do — defect #1: unkeyed rules must not get 24h silence).
 			type group struct {
 				key      string
 				evidence []string
@@ -110,6 +127,9 @@ func (r *Runner) poll(ctx context.Context) {
 				ctxEnd := now.Add(ctxCfg.ContextWindow)
 				ctxEntries, ctxErr := client.queryRaw(ctx, streamSelector, ctxStart, ctxEnd, ctxCfg.ContextLines)
 				if ctxErr == nil {
+					sort.Slice(ctxEntries, func(i, j int) bool {
+						return ctxEntries[i].Time < ctxEntries[j].Time
+					})
 					for _, ce := range ctxEntries {
 						ctxLines = append(ctxLines, client.mask.Redact(entryLine(ce)))
 					}
@@ -133,14 +153,16 @@ func (r *Runner) poll(ctx context.Context) {
 				if quiet {
 					continue
 				}
-				existed, err := r.db.Upsert(fp, rule.ID, rule.Severity, srcName)
+				_, err = r.db.Upsert(fp, rule.ID, rule.Severity, srcName)
 				if err != nil {
 					slog.Warn("db upsert error", "err", err)
 				}
-				// Apply quiet_window_default on first fire, but only when key_fields
-				// are configured. Whole-rule (empty-key) quiet windows would allow a
-				// single event to silence every actor for 24h — an attacker primitive.
-				if !existed && r.cfg.Detector.QuietWindowDefault > 0 && len(rule.KeyFields) > 0 {
+				// Apply quiet_window_default on every emit, not just first fire
+				// (defect #2: after window expiry, existed=true and SetQuiet was
+				// never called again, causing the rule to fire every poll).
+				// Only apply when key_fields are configured: whole-rule quiet windows
+				// allow a single event to silence all actors for 24h.
+				if r.cfg.Detector.QuietWindowDefault > 0 && len(rule.KeyFields) > 0 {
 					quietUntil := now.Add(r.cfg.Detector.QuietWindowDefault)
 					if err := r.db.SetQuiet(fp, quietUntil); err != nil {
 						slog.Warn("db setquiet error", "err", err)
@@ -162,16 +184,25 @@ func (r *Runner) poll(ctx context.Context) {
 
 	// Fail-open pattern scan over the full log tail.
 	if len(r.cfg.Detector.FailOpenPatterns) > 0 {
+		start := now.Add(-interval)
 		r.scanFailOpen(ctx, start, now)
 	}
 }
 
-// entryLine returns the best human-readable representation of a log entry.
-// When _msg is empty (structured JSON audit logs), it serialises all non-stream
-// fields as key=value pairs (defect #3: LLM received "missing _msg field").
+// entryLine returns the best human-readable representation of a log entry,
+// always prefixed with the RFC3339 timestamp so the LLM and operator can
+// determine event order without relying on query sort order.
+//
+// When _msg is non-empty (syslog, journald, text logs), returns "T _msg".
+// When _msg is empty (structured JSON audit logs with pack_json or no _msg),
+// serialises all non-_stream* tags as sorted key=value pairs.
 func entryLine(e vlEntry) string {
+	ts := e.Time
+	if ts == "" {
+		ts = "?"
+	}
 	if e.Msg != "" {
-		return e.Msg
+		return ts + " " + e.Msg
 	}
 	// Build sorted key=value string from all non-_stream* tags.
 	keys := make([]string, 0, len(e.Tags))
@@ -181,7 +212,8 @@ func entryLine(e vlEntry) string {
 		}
 	}
 	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
+	parts := make([]string, 0, len(keys)+1)
+	parts = append(parts, ts)
 	for _, k := range keys {
 		parts = append(parts, k+"="+e.Tags[k])
 	}
@@ -189,20 +221,32 @@ func entryLine(e vlEntry) string {
 }
 
 // ruleKey computes the fingerprint key component for one log entry.
-// When rule.KeyFields is configured, it hashes the values of those fields
-// from the entry's tags, scoping quiet windows to that actor/object.
-// Falls back to "" (whole-rule scope) when no key_fields are set; in that
-// case quiet_window_default is intentionally NOT applied (see poll()).
+//
+// When key_fields is set, it hashes the values of those fields from the
+// entry's tags, scoping quiet windows to a specific actor/object pair.
+//
+// When key_fields is empty (text rules, syslog), it falls back to hashing
+// _msg. This is the fail-safe default: unique log lines produce distinct
+// fingerprints (noisy but safe), while exact-duplicate lines dedup normally.
+// The empty-key (whole-rule) scope is NOT used, because a single event would
+// silence the whole rule for 24h — an attacker primitive.
+//
+// Note: key_fields reads e.Tags only; _msg is not in Tags (it is e.Msg).
+// Use the special sentinel value "_msg" in key_fields only as an explicit
+// override — it will always read as "" from Tags and collapse all events.
+// The msg-hash fallback (no key_fields) is the correct way to key on content.
 //
 // Key field selection guidance: prefer fields controlled by the API server
 // (user.username, verb) over fully attacker-controlled target identifiers
-// (objectRef.name). Including target fields is still useful — it makes a new
-// target always produce a fresh finding — but does not confer suppression
-// power to the attacker because quiet windows are only set on first-fire, and
-// a new objectRef.name always produces a distinct fingerprint.
+// (objectRef.name). Including target fields is still useful — a new target
+// always produces a fresh finding — but does not confer suppression power.
 func ruleKey(rule config.Rule, e vlEntry) string {
 	if len(rule.KeyFields) == 0 {
-		return ""
+		// Fail-safe default: key on _msg content so identical lines dedup but
+		// new content always fires.
+		h := sha256.New()
+		fmt.Fprintf(h, "msg=%s", e.Msg)
+		return fmt.Sprintf("%x", h.Sum(nil))[:12]
 	}
 	h := sha256.New()
 	for _, field := range rule.KeyFields {
