@@ -55,12 +55,14 @@ func Parse(text string) (*Command, error) {
 	return nil, ErrNoCommand
 }
 
-// parseLine parses a single "/" prefixed line.  Returns nil if it starts with
-// "/" but is not one of the recognised commands (allows future extensions).
+// parseLine parses a single "/" prefixed line.  Returns a descriptive error
+// for any unrecognised "/command" so the caller can reply with a warning.
 func parseLine(line string) (*Command, error) {
 	switch {
-	case line == "/unquiet":
-		return &Command{Kind: KindUnquiet}, nil
+	case line == "/unquiet" || strings.HasPrefix(line, "/unquiet "):
+		// Optional reason after /unquiet is stored but not used by the engine.
+		reason := strings.TrimSpace(strings.TrimPrefix(line, "/unquiet"))
+		return &Command{Kind: KindUnquiet, Reason: reason}, nil
 
 	case strings.HasPrefix(line, "/quiet "):
 		rest := strings.TrimPrefix(line, "/quiet ")
@@ -73,7 +75,10 @@ func parseLine(line string) (*Command, error) {
 		}
 		return &Command{Kind: KindBenign, Reason: reason}, nil
 	}
-	return nil, nil
+	// Any "/" line that isn't a known command gets an explicit error so the
+	// caller can send a ⚠️ reply instead of silently ignoring it.
+	cmd := strings.Fields(line)[0]
+	return nil, fmt.Errorf("commands: unknown command %q (known: /quiet, /unquiet, /benign)", cmd)
 }
 
 // parseQuiet parses "<duration> <reason…>".

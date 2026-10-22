@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -123,7 +124,7 @@ func (c *Client) applyCommand(
 	case commands.KindQuiet:
 		c.applyQuiet(ctx, cfg, db, fingerprint, threadID, actorID, cmd)
 	case commands.KindUnquiet:
-		c.applyUnquiet(ctx, db, fingerprint, threadID, actorID)
+		c.applyUnquiet(ctx, cfg, db, fingerprint, threadID, actorID, cmd)
 	case commands.KindBenign:
 		c.applyBenign(ctx, cfg, db, fingerprint, threadID, actorID, cmd)
 	}
@@ -164,19 +165,24 @@ func (c *Client) applyQuiet(
 		c.replyThread(ctx, threadID, "⚠️ Не удалось установить quiet: ошибка БД.")
 		return
 	}
-	msg := fmt.Sprintf("✅ `%s`: тихий режим до %s. Причина: %s", actorID, until.Format("2006-01-02 15:04 MST"), cmd.Reason)
-	slog.Info("board: command accepted", "kind", "quiet", "actor", actorID, "until", until, "fp", fingerprint)
+	label := cfg.ActorLabel(actorID)
+	untilStr := until.UTC().Format("2006-01-02 15:04 UTC")
+	msg := fmt.Sprintf("✅ `%s`: тихий режим до %s. Причина: %s", label, untilStr, cmd.Reason)
+	slog.Info("board: command accepted", "kind", "quiet", "actor", label, "until", until, "fp", fingerprint)
+	emitCommandAccepted("quiet", label, fingerprint, fmt.Sprintf("until=%s reason=%s", untilStr, cmd.Reason))
 	c.replyThread(ctx, threadID, msg)
 }
 
-func (c *Client) applyUnquiet(ctx context.Context, db *state.DB, fingerprint, threadID, actorID string) {
+func (c *Client) applyUnquiet(ctx context.Context, cfg config.CommandsConfig, db *state.DB, fingerprint, threadID, actorID string, cmd *commands.Command) {
 	if err := db.SetQuiet(fingerprint, time.Time{}); err != nil {
 		slog.Warn("board: commands: unquiet db", "err", err)
 		c.replyThread(ctx, threadID, "⚠️ Не удалось снять quiet: ошибка БД.")
 		return
 	}
-	slog.Info("board: command accepted", "kind", "unquiet", "actor", actorID, "fp", fingerprint)
-	c.replyThread(ctx, threadID, fmt.Sprintf("✅ `%s`: тихий режим отменён.", actorID))
+	label := cfg.ActorLabel(actorID)
+	slog.Info("board: command accepted", "kind", "unquiet", "actor", label, "fp", fingerprint)
+	emitCommandAccepted("unquiet", label, fingerprint, cmd.Reason)
+	c.replyThread(ctx, threadID, fmt.Sprintf("✅ `%s`: тихий режим отменён.", label))
 }
 
 func (c *Client) applyBenign(
@@ -223,10 +229,30 @@ func (c *Client) applyBenign(
 		c.replyThread(ctx, threadID, "⚠️ Не удалось сохранить benign override: ошибка БД.")
 		return
 	}
+	label := cfg.ActorLabel(actorID)
+	expiresStr := expiresAt.Format("2006-01-02")
 	msg := fmt.Sprintf("✅ `%s`: `%s` помечено как benign до %s (требует подтверждения оператора). Причина: %s",
-		actorID, pattern, expiresAt.Format("2006-01-02"), cmd.Reason)
-	slog.Info("board: command accepted", "kind", "benign", "actor", actorID, "pattern", pattern, "fp", fingerprint)
+		label, pattern, expiresStr, cmd.Reason)
+	slog.Info("board: command accepted", "kind", "benign", "actor", label, "pattern", pattern, "fp", fingerprint)
+	emitCommandAccepted("benign", label, fingerprint, fmt.Sprintf("pattern=%s expires=%s reason=%s", pattern, expiresStr, cmd.Reason))
 	c.replyThread(ctx, threadID, msg)
+}
+
+// emitCommandAccepted writes a structured JSON line to stdout so that
+// vlagent / Grafana can alert on command-accepted events (audit trail,
+// and effectively a Telegram notification via the existing Grafana rule).
+func emitCommandAccepted(kind, actorLabel, fingerprint, detail string) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(map[string]interface{}{
+		"time":        time.Now().UTC().Format(time.RFC3339),
+		"level":       "INFO",
+		"msg":         "command-accepted",
+		"kind":        kind,
+		"actor":       actorLabel,
+		"fingerprint": fingerprint,
+		"detail":      detail,
+	})
 }
 
 func isAllowedActor(actorID string, list []string) bool {

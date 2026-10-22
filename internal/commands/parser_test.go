@@ -78,17 +78,46 @@ func TestParseBenignMissingReason(t *testing.T) {
 }
 
 func TestParseNoCommand(t *testing.T) {
-	inputs := []string{
+	// These inputs have no "/" line at all — expect ErrNoCommand.
+	noCmd := []string{
 		"",
 		"just a normal reply",
 		"no slash here",
-		"/unknown-command foo",
 	}
-	for _, s := range inputs {
+	for _, s := range noCmd {
 		_, err := Parse(s)
 		if !errors.Is(err, ErrNoCommand) {
 			t.Errorf("input %q: want ErrNoCommand, got %v", s, err)
 		}
+	}
+}
+
+func TestParseUnknownCommand(t *testing.T) {
+	// A "/" line that isn't a known command must return a descriptive error,
+	// not ErrNoCommand, so the caller can reply with a ⚠️.
+	inputs := []string{
+		"/unknown-command foo",
+		"/typo",
+		"/QUIET 1h wrong-case",
+	}
+	for _, s := range inputs {
+		_, err := Parse(s)
+		if err == nil || errors.Is(err, ErrNoCommand) {
+			t.Errorf("input %q: want descriptive error, got %v", s, err)
+		}
+	}
+}
+
+func TestParseUnquietWithReason(t *testing.T) {
+	cmd, err := Parse("/unquiet control test after incident-42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd.Kind != KindUnquiet {
+		t.Fatalf("want unquiet, got %q", cmd.Kind)
+	}
+	if cmd.Reason == "" {
+		t.Fatal("reason should be preserved")
 	}
 }
 

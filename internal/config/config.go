@@ -164,16 +164,28 @@ type DigestConfig struct {
 
 // Commands controls the /quiet /benign /unquiet command parser.
 type CommandsConfig struct {
-	// AllowedActors is a list of board actor nicknames allowed to issue commands.
+	// AllowedActors is a list of board actor IDs allowed to issue commands.
 	AllowedActors []string `yaml:"allowed_actors"`
 	// CriticalMuteActors can mute critical findings (subset of AllowedActors).
 	CriticalMuteActors []string `yaml:"critical_mute_actors"`
+	// ActorNames maps stable actor IDs to human-readable display names for
+	// confirmation messages. Authorization always uses the ID; this is display-only.
+	ActorNames map[string]string `yaml:"actor_names"`
 	// MaxAgentQuietDays is the max quiet duration an agent (non-critical-mute actor)
 	// can set via /quiet (default 7).
 	MaxAgentQuietDays int `yaml:"max_agent_quiet_days"`
 	// MaxAgentBenignDays is how long an agent's /benign entry lasts without
 	// operator confirmation (default 30).
 	MaxAgentBenignDays int `yaml:"max_agent_benign_days"`
+}
+
+// ActorLabel returns the display name for actorID if configured in ActorNames,
+// otherwise falls back to the raw ID.
+func (c CommandsConfig) ActorLabel(actorID string) string {
+	if name, ok := c.ActorNames[actorID]; ok && name != "" {
+		return name
+	}
+	return actorID
 }
 
 // Load reads and parses the YAML config at path, then merges any rules from
