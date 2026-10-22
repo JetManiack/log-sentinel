@@ -21,11 +21,17 @@ var defaultPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(password[=:\s]+)\S{8,}`),
 	regexp.MustCompile(`(?i)(token[=:\s]+)[A-Za-z0-9_\-\.]{20,}`),
 
-	// Environment variable patterns seen in sudo journal lines and shell env dumps:
-	//   KEY=<hex32+>  TOKEN=<hex32+>  COOKIE=<hex32+>
-	// These cover bare session tokens (no "Bearer" prefix) that the masker
-	// otherwise misses, e.g. CLAUDE_CODE_MESSAGING_TOKEN=abc123...
-	regexp.MustCompile(`(?i)((?:KEY|TOKEN|COOKIE|SESSION)=['\"]?)[0-9A-Fa-f]{32,}`),
+	// sudo ENV dump: strip everything between "ENV=" and " ; COMMAND=".
+	// sudo writes the caller's full environment into the journal in this form,
+	// including session tokens, cookies, and custom auth headers. Value-pattern
+	// masking cannot cover all possible env var values (mixed-case alnum cookies,
+	// UUIDs, proxy headers with spaces), so we drop the entire ENV block.
+	regexp.MustCompile(`(ENV=)[^;]+?(; COMMAND=)`),
+
+	// Any env variable whose name contains a sensitive keyword, whatever value
+	// charset (covers SNAP_COOKIE, SNAP_CONTEXT, CLAUDE_CODE_SESSION_ID, etc.).
+	// Matches up to the next space, semicolon, or end of string.
+	regexp.MustCompile(`(?i)([A-Z0-9_]*(?:KEY|TOKEN|COOKIE|SECRET|SESSION|PASSWORD|AUTH|HEADERS|CONTEXT)[A-Z0-9_]*=['\"]?)[^\s;]+`),
 
 	// sk- prefixed keys (LiteLLM, OpenAI)
 	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),

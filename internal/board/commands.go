@@ -255,13 +255,16 @@ func parseThread(raw json.RawMessage) (*boardThread, error) {
 	if text == "" {
 		return nil, fmt.Errorf("empty thread result")
 	}
+	// The board API returns author_id as a top-level field on each reply,
+	// not nested under an actor object. We try both shapes for resilience.
 	var v struct {
 		Replies []struct {
-			ID    string `json:"id"`
-			Actor struct {
+			ID       string `json:"id"`
+			AuthorID string `json:"author_id"` // actual board API field
+			Actor    struct {
 				ID       string `json:"id"`
 				Nickname string `json:"nickname"`
-			} `json:"actor"`
+			} `json:"actor"` // fallback for hypothetical future shape
 			Body string `json:"body"`
 		} `json:"replies"`
 	}
@@ -270,9 +273,10 @@ func parseThread(raw json.RawMessage) (*boardThread, error) {
 	}
 	t := &boardThread{}
 	for _, r := range v.Replies {
-		// Fall back to nickname only if the board does not provide a stable ID,
-		// treating both as advisory — the allowlist is the real gate.
-		actorID := r.Actor.ID
+		actorID := r.AuthorID
+		if actorID == "" {
+			actorID = r.Actor.ID
+		}
 		if actorID == "" {
 			actorID = r.Actor.Nickname
 		}

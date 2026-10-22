@@ -30,18 +30,26 @@ func TestRedact(t *testing.T) {
 			input:      "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
 			mustAbsent: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
 		},
-		// sudo journal env dump: bare hex session tokens (no Bearer prefix)
+		// sudo ENV= block: entire block between ENV= and ; COMMAND= is stripped.
+		// Real sudo journal format; values are redacted in the fixture below.
 		{
-			input:      "USER=root ; COMMAND=/usr/bin/true ; ENV=CLAUDE_CODE_MESSAGING_TOKEN=aabbccddeeff00112233445566778899 OTHER=x",
-			mustAbsent: "aabbccddeeff00112233445566778899",
+			input:      "ilazarev : PWD=/home/ilazarev ; USER=root ; ENV=SNAP_COOKIE=AbCdEfGhIjKlMnOpQrStUvWxYz1234567890abcdefgh SNAP_CONTEXT=ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321zyxwvuts CLAUDE_CODE_SESSION_ID=12345678-1234-1234-1234-123456789abc ANTHROPIC_CUSTOM_HEADERS=proxy_key: sk-pr-00000000-0000-0000-0000-000000000000 ; COMMAND=/usr/bin/true",
+			mustAbsent: "AbCdEfGhIjKlMnOpQrStUvWxYz1234567890abcdefgh",
 		},
 		{
-			input:      "SNAP_COOKIE=deadbeef01234567deadbeef01234567 PATH=/usr/bin",
-			mustAbsent: "deadbeef01234567deadbeef01234567",
+			// SNAP_CONTEXT value: mixed-case alnum, 52 chars (not hex, not base64-60)
+			input:      "SNAP_CONTEXT=ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321zyxwvuts ; PATH=/usr/bin",
+			mustAbsent: "ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321zyxwvuts",
 		},
 		{
-			input:      "SESSION=0123456789abcdef0123456789abcdef ; SHELL=/bin/bash",
-			mustAbsent: "0123456789abcdef0123456789abcdef",
+			// CLAUDE_CODE_SESSION_ID: UUID format
+			input:      "CLAUDE_CODE_SESSION_ID=12345678-1234-1234-1234-123456789abc",
+			mustAbsent: "12345678-1234-1234-1234-123456789abc",
+		},
+		{
+			// ANTHROPIC_CUSTOM_HEADERS: value contains spaces — stripped by ENV= block rule
+			input:      "ENV=ANTHROPIC_CUSTOM_HEADERS=proxy_key: sk-pr-test1234 OTHER=x ; COMMAND=/bin/sh",
+			mustAbsent: "proxy_key",
 		},
 	}
 

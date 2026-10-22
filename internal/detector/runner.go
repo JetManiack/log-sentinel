@@ -157,13 +157,19 @@ func (r *Runner) poll(ctx context.Context) {
 				if err != nil {
 					slog.Warn("db upsert error", "err", err)
 				}
-				// Apply quiet_window_default on every emit, not just first fire
-				// (defect #2: after window expiry, existed=true and SetQuiet was
-				// never called again, causing the rule to fire every poll).
-				// Only apply when key_fields are configured: whole-rule quiet windows
-				// allow a single event to silence all actors for 24h.
-				if r.cfg.Detector.QuietWindowDefault > 0 && len(rule.KeyFields) > 0 {
-					quietUntil := now.Add(r.cfg.Detector.QuietWindowDefault)
+				// Apply quiet window on every emit:
+				// - With key_fields: use quiet_window_default (actor/object scope).
+				// - Without key_fields (msg-hash key): use 2×interval+overlap to
+				//   dedup across the poll overlap window without long-term silence.
+				//   This prevents the same _msg from firing twice due to the 5s
+				//   overlap, while new unique messages always produce fresh findings.
+				var quietUntil time.Time
+				if len(rule.KeyFields) > 0 && r.cfg.Detector.QuietWindowDefault > 0 {
+					quietUntil = now.Add(r.cfg.Detector.QuietWindowDefault)
+				} else if len(rule.KeyFields) == 0 {
+					quietUntil = now.Add(2*interval + pollOverlap)
+				}
+				if !quietUntil.IsZero() {
 					if err := r.db.SetQuiet(fp, quietUntil); err != nil {
 						slog.Warn("db setquiet error", "err", err)
 					}
