@@ -36,9 +36,21 @@ type Command struct {
 // ErrNoCommand is returned when the text contains no command line.
 var ErrNoCommand = fmt.Errorf("no command found")
 
-// Parse scans text line-by-line for the first command at line-start and returns it.
-// Returns ErrNoCommand if none found, a descriptive error for malformed commands.
+// Parse scans text line-by-line for the first valid command at line-start.
+//
+// Scanning rules:
+//   - Lines not starting with "/" are ignored.
+//   - Lines starting with "/" but not matching the command-word pattern
+//     (e.g. paths "/etc/…", "/tmp", "/data") are skipped silently.
+//   - Lines that match a known malformed command (bare /quiet, /benign) return
+//     a descriptive error immediately — these are unambiguous mistakes.
+//   - Lines that match command-word shape but are unknown ("/foo") are noted
+//     and scanning continues; the "unknown command" error is returned only if
+//     no valid command was found later in the text.
+//
+// Returns ErrNoCommand when no "/" lines of any kind were found.
 func Parse(text string) (*Command, error) {
+	var firstUnknown error // deferred: only returned if no valid command follows
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimRightFunc(raw, unicode.IsSpace)
 		if !strings.HasPrefix(line, "/") {
@@ -46,13 +58,31 @@ func Parse(text string) (*Command, error) {
 		}
 		cmd, err := parseLine(line)
 		if err != nil {
+			if isUnknownCommandErr(err) {
+				// Remember the error but keep scanning — a valid command may
+				// still appear on a later line (e.g. "/tmp is full\n/quiet …").
+				if firstUnknown == nil {
+					firstUnknown = err
+				}
+				continue
+			}
+			// Malformed known command (missing args, bad duration) — fail now.
 			return nil, err
 		}
 		if cmd != nil {
 			return cmd, nil
 		}
 	}
+	if firstUnknown != nil {
+		return nil, firstUnknown
+	}
 	return nil, ErrNoCommand
+}
+
+// isUnknownCommandErr reports whether err is the "unknown command" error
+// produced by parseLine for a command-word-shaped but unrecognised token.
+func isUnknownCommandErr(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "commands: unknown command ")
 }
 
 // parseLine parses a single "/" prefixed line.

@@ -130,6 +130,23 @@ func TestParsePathLinesSkipped(t *testing.T) {
 			input: "/v1/models was called\n/benign routine health check",
 			want:  KindBenign,
 		},
+		{
+			// Single-segment paths like /tmp, /data, /state match isCommandWord
+			// but must not block a valid command on a later line.
+			name:  "single-segment path before quiet",
+			input: "/tmp is full\n/quiet 1h reason",
+			want:  KindQuiet,
+		},
+		{
+			name:  "mount point mention before unquiet",
+			input: "/data is mounted ro\n/unquiet",
+			want:  KindUnquiet,
+		},
+		{
+			name:  "state path before benign",
+			input: "/state directory missing\n/benign known infra issue",
+			want:  KindBenign,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -93,19 +93,18 @@ func (c *Client) checkThread(
 			continue
 		}
 
+		// Authorize before parsing so unauthorized actors get no reply at all.
+		if !isAllowedActor(reply.ActorID, cfg.AllowedActors) {
+			slog.Debug("board: commands: actor not allowed, ignoring", "actor_id", reply.ActorID, "reply", reply.ID)
+			continue
+		}
+
 		cmd, err := commands.Parse(reply.Body)
 		if err != nil {
 			if !errors.Is(err, commands.ErrNoCommand) {
 				slog.Warn("board: commands: parse error", "reply_id", reply.ID, "err", err)
 				c.replyThread(ctx, threadID, fmt.Sprintf("⚠️ Ошибка разбора команды: %v", err))
 			}
-			continue
-		}
-
-		// Authorize against the stable actor ID, not the mutable display nickname.
-		if !isAllowedActor(reply.ActorID, cfg.AllowedActors) {
-			slog.Warn("board: commands: actor not allowed", "actor_id", reply.ActorID, "reply", reply.ID)
-			c.replyThread(ctx, threadID, fmt.Sprintf("⛔ actor `%s` не в списке allowed_actors, команда отклонена.", reply.ActorID))
 			continue
 		}
 
