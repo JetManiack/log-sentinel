@@ -31,6 +31,7 @@ func TestRedact(t *testing.T) {
 			mustAbsent: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
 		},
 		// sudo ENV= block: entire block between ENV= and ; COMMAND= is stripped.
+		// COMMAND= suffix must be preserved (operator needs to know what ran).
 		// Real sudo journal format; values are redacted in the fixture below.
 		{
 			input:      "ilazarev : PWD=/home/ilazarev ; USER=root ; ENV=SNAP_COOKIE=AbCdEfGhIjKlMnOpQrStUvWxYz1234567890abcdefgh SNAP_CONTEXT=ZyXwVuTsRqPoNmLkJiHgFeDcBa0987654321zyxwvuts CLAUDE_CODE_SESSION_ID=12345678-1234-1234-1234-123456789abc ANTHROPIC_CUSTOM_HEADERS=proxy_key: sk-pr-00000000-0000-0000-0000-000000000000 ; COMMAND=/usr/bin/true",
@@ -69,6 +70,20 @@ func TestRedact(t *testing.T) {
 		if c.mustAbsent != "" && containsSubstring(out, c.mustAbsent) {
 			t.Errorf("Redact(%q) = %q; should not contain %q", c.input, out, c.mustAbsent)
 		}
+	}
+}
+
+// TestRedactPreservesCommandSuffix verifies that "COMMAND=/path" is not lost
+// when the ENV= block is stripped — the operator must see what command ran.
+func TestRedactPreservesCommandSuffix(t *testing.T) {
+	m := masker.Default()
+	line := "ilazarev : PWD=/home/ilazarev ; ENV=SECRET=abc123 SNAP_COOKIE=xyz789 ; COMMAND=/usr/bin/true"
+	out := m.Redact(line)
+	if !containsSubstring(out, "COMMAND=/usr/bin/true") {
+		t.Errorf("COMMAND= suffix lost after redaction: %q", out)
+	}
+	if containsSubstring(out, "abc123") || containsSubstring(out, "xyz789") {
+		t.Errorf("secret values not redacted: %q", out)
 	}
 }
 

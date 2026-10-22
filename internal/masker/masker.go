@@ -21,14 +21,12 @@ var defaultPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(password[=:\s]+)\S{8,}`),
 	regexp.MustCompile(`(?i)(token[=:\s]+)[A-Za-z0-9_\-\.]{20,}`),
 
-	// sudo ENV dump: strip everything between "ENV=" and " ; COMMAND=".
-	// sudo writes the caller's full environment into the journal in this form,
-	// including session tokens, cookies, and custom auth headers. Value-pattern
-	// masking cannot cover all possible env var values (mixed-case alnum cookies,
-	// UUIDs, proxy headers with spaces), so we drop the entire ENV block.
-	// Note: long env dumps are split into "(command continued)" journal entries,
-	// so this pattern only fires when both endpoints appear on the same line.
-	regexp.MustCompile(`(ENV=)[^;]+?(; COMMAND=)`),
+	// sudo ENV dump: strip everything between "ENV=" and " ; COMMAND=" (or EOL).
+	// Group 1 = "ENV=", group 2 = "; COMMAND=" (optional, preserved as suffix).
+	// Uses two-group convention so Redact emits: ENV=[REDACTED]; COMMAND=...
+	// The terminator is optional so the block is still stripped when the line
+	// ends before "; COMMAND=" (truncated journal entries).
+	regexp.MustCompile(`(ENV=)[^;]+(; COMMAND=)?`),
 
 	// sudo "(command continued)" lines: the entire content after the marker is
 	// an env dump continuation and must be redacted wholesale.
@@ -76,17 +74,26 @@ func New(extra ...string) (*Mask, error) {
 const redacted = "[REDACTED]"
 
 // Redact replaces all matched secret-shaped substrings with [REDACTED].
+//
+// Pattern conventions:
+//   - No capture groups → entire match is replaced.
+//   - One capture group → group 1 is a prefix to preserve; the rest is replaced.
+//   - Two capture groups → group 1 is a prefix, group 2 is a suffix to preserve;
+//     everything between them (the secret span) is replaced.
 func (m *Mask) Redact(s string) string {
 	for _, p := range m.patterns {
-		// Preserve the capture group prefix (e.g. "Bearer ") and replace only the secret part.
 		s = p.ReplaceAllStringFunc(s, func(match string) string {
-			submatches := p.FindStringSubmatch(match)
-			if len(submatches) > 1 {
-				// Group 1 is the prefix; replace the rest.
-				prefix := submatches[1]
-				return prefix + redacted
+			subs := p.FindStringSubmatch(match)
+			switch len(subs) {
+			case 3:
+				// prefix [REDACTED] suffix
+				return subs[1] + redacted + subs[2]
+			case 2:
+				// prefix [REDACTED]
+				return subs[1] + redacted
+			default:
+				return redacted
 			}
-			return redacted
 		})
 	}
 	return s
