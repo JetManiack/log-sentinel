@@ -93,13 +93,61 @@ func TestParseNoCommand(t *testing.T) {
 }
 
 func TestParseUnknownCommand(t *testing.T) {
-	// A "/" line that isn't a known command must return a descriptive error,
-	// not ErrNoCommand, so the caller can reply with a ⚠️.
+	// A "/" line with a command-shaped word (all lowercase, no path sep) that
+	// isn't a known command must return a descriptive error.
 	inputs := []string{
 		"/unknown-command foo",
 		"/typo",
-		"/QUIET 1h wrong-case",
 	}
+	for _, s := range inputs {
+		_, err := Parse(s)
+		if err == nil || errors.Is(err, ErrNoCommand) {
+			t.Errorf("input %q: want descriptive error, got %v", s, err)
+		}
+	}
+}
+
+func TestParsePathLinesSkipped(t *testing.T) {
+	// A path-like line starting with "/" must be skipped so that a real command
+	// on the next line is still applied. This was the regression in 04c8928.
+	cases := []struct {
+		name  string
+		input string
+		want  Kind
+	}{
+		{
+			name:  "path before quiet",
+			input: "/etc/sentinel/rules.d/vllm.yaml is updated\n/quiet 1h reason here",
+			want:  KindQuiet,
+		},
+		{
+			name:  "uppercase-slash line before unquiet",
+			input: "/QUIET is wrong case\n/unquiet",
+			want:  KindUnquiet,
+		},
+		{
+			name:  "digit in word before benign",
+			input: "/v1/models was called\n/benign routine health check",
+			want:  KindBenign,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, err := Parse(tc.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cmd.Kind != tc.want {
+				t.Fatalf("got %q, want %q", cmd.Kind, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseBareCommandErrors(t *testing.T) {
+	// /quiet and /benign with no arguments must return a descriptive error,
+	// not ErrNoCommand.
+	inputs := []string{"/quiet", "/benign"}
 	for _, s := range inputs {
 		_, err := Parse(s)
 		if err == nil || errors.Is(err, ErrNoCommand) {

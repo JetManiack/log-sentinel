@@ -55,18 +55,39 @@ func Parse(text string) (*Command, error) {
 	return nil, ErrNoCommand
 }
 
-// parseLine parses a single "/" prefixed line.  Returns a descriptive error
-// for any unrecognised "/command" so the caller can reply with a warning.
+// parseLine parses a single "/" prefixed line.
+//
+// A line is a command attempt only if its first word is ^/[a-z][a-z-]*$ —
+// all lowercase letters and hyphens, no path separators, no dots, no digits.
+// This lets lines like "/etc/sentinel/config.yaml is updated" pass through
+// silently so that a path in a reply body doesn't suppress a real command on
+// the next line.
+//
+// Returns (cmd, nil) on success, (nil, err) for malformed known commands and
+// unrecognised command words, (nil, nil) for non-command lines.
 func parseLine(line string) (*Command, error) {
+	if len(line) == 0 || line[0] != '/' {
+		return nil, nil
+	}
+	firstWord := strings.Fields(line)[0]
+	if !isCommandWord(firstWord) {
+		return nil, nil // path or uppercase line — skip, keep scanning
+	}
+
 	switch {
 	case line == "/unquiet" || strings.HasPrefix(line, "/unquiet "):
-		// Optional reason after /unquiet is stored but not used by the engine.
 		reason := strings.TrimSpace(strings.TrimPrefix(line, "/unquiet"))
 		return &Command{Kind: KindUnquiet, Reason: reason}, nil
+
+	case line == "/quiet":
+		return nil, fmt.Errorf("commands: /quiet requires a duration and reason")
 
 	case strings.HasPrefix(line, "/quiet "):
 		rest := strings.TrimPrefix(line, "/quiet ")
 		return parseQuiet(rest)
+
+	case line == "/benign":
+		return nil, fmt.Errorf("commands: /benign requires a reason")
 
 	case strings.HasPrefix(line, "/benign "):
 		reason := strings.TrimSpace(strings.TrimPrefix(line, "/benign "))
@@ -75,10 +96,22 @@ func parseLine(line string) (*Command, error) {
 		}
 		return &Command{Kind: KindBenign, Reason: reason}, nil
 	}
-	// Any "/" line that isn't a known command gets an explicit error so the
-	// caller can send a ⚠️ reply instead of silently ignoring it.
-	cmd := strings.Fields(line)[0]
-	return nil, fmt.Errorf("commands: unknown command %q (known: /quiet, /unquiet, /benign)", cmd)
+
+	return nil, fmt.Errorf("commands: unknown command %q (known: /quiet, /unquiet, /benign)", firstWord)
+}
+
+// isCommandWord reports whether w looks like a command word: /[a-z][a-z-]*
+// No path separators after the first character, no dots, no uppercase, no digits.
+func isCommandWord(w string) bool {
+	if len(w) < 2 || w[0] != '/' {
+		return false
+	}
+	for _, c := range w[1:] {
+		if !((c >= 'a' && c <= 'z') || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseQuiet parses "<duration> <reason…>".
