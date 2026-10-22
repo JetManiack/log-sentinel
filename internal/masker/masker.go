@@ -30,15 +30,16 @@ var defaultPatterns = []*regexp.Regexp{
 
 	// sudo "(command continued)" lines: the entire content after the marker is
 	// an env dump continuation and must be redacted wholesale.
-	regexp.MustCompile(`(\(command continued\) ?\S* ?)[^\x00]+`),
+	// Capture only the marker itself; do NOT capture the first word — it is
+	// part of the env dump and could itself be sensitive.
+	regexp.MustCompile(`(\(command continued\) ?)[^\x00]+`),
 
 	// Any env variable whose name contains a sensitive keyword.
-	// Masks the value up to " ; " (sudo separator) or end of string.
-	// This is intentionally greedy so multi-word header values are fully covered
-	// (e.g. ANTHROPIC_CUSTOM_HEADERS=proxy_key: <uuid> X-Header: <val>).
-	// Re2 does not support lookahead, so we use [^;]* and trim " ; " in the
-	// replacement logic: the capture group prefix is kept, the value is replaced.
-	regexp.MustCompile(`(?i)([A-Z0-9_]*(?:KEY|TOKEN|COOKIE|SECRET|SESSION|PASSWORD|AUTH|HEADERS|CONTEXT)[A-Z0-9_]*=['\"]?)[^;]+`),
+	// Redact to end of line to handle multi-word header values, intra-value
+	// semicolons, and any other edge cases safely.  RE2 has no lookahead so
+	// we cannot stop at the sudo ` ; ` separator without post-processing;
+	// redacting to EOL is the safe default for these high-risk variables.
+	regexp.MustCompile(`(?i)([A-Z0-9_]*(?:KEY|TOKEN|COOKIE|SECRET|SESSION|PASSWORD|AUTH|HEADERS|CONTEXT)[A-Z0-9_]*=['\"]?)[^\n\x00]+`),
 
 	// sk- prefixed keys (LiteLLM, OpenAI)
 	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),

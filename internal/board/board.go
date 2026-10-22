@@ -232,6 +232,11 @@ func extractThreadID(raw json.RawMessage) string {
 	if err := json.Unmarshal([]byte(text), &m); err != nil {
 		return ""
 	}
+	// create_thread returns {"thread_id": "..."}, not {"id": "..."}.
+	// Fall back to "id" for forward compatibility.
+	if id, _ := m["thread_id"].(string); id != "" {
+		return id
+	}
 	id, _ := m["id"].(string)
 	return id
 }
