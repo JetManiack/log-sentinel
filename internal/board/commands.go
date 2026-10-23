@@ -29,6 +29,7 @@ import (
 
 	"github.com/JetManiack/log-sentinel/internal/commands"
 	"github.com/JetManiack/log-sentinel/internal/config"
+	"github.com/JetManiack/log-sentinel/internal/masker"
 	"github.com/JetManiack/log-sentinel/internal/state"
 )
 
@@ -166,9 +167,10 @@ func (c *Client) applyQuiet(
 	}
 	label := cfg.ActorLabel(actorID)
 	untilStr := until.UTC().Format("2006-01-02 15:04 UTC")
-	msg := fmt.Sprintf("✅ `%s`: тихий режим до %s. Причина: %s", label, untilStr, cmd.Reason)
+	reason := masker.Default().Redact(cmd.Reason)
+	msg := fmt.Sprintf("✅ `%s`: тихий режим до %s. Причина: %s", label, untilStr, reason)
 	slog.Info("board: command accepted", "kind", "quiet", "actor", label, "until", until, "fp", fingerprint)
-	emitCommandAccepted("quiet", label, fingerprint, fmt.Sprintf("until=%s reason=%s", untilStr, cmd.Reason))
+	emitCommandAccepted("quiet", label, fingerprint, fmt.Sprintf("until=%s reason=%s", untilStr, reason))
 	c.replyThread(ctx, threadID, msg)
 }
 
@@ -230,10 +232,11 @@ func (c *Client) applyBenign(
 	}
 	label := cfg.ActorLabel(actorID)
 	expiresStr := expiresAt.Format("2006-01-02")
+	reason := masker.Default().Redact(cmd.Reason)
 	msg := fmt.Sprintf("✅ `%s`: `%s` помечено как benign до %s (требует подтверждения оператора). Причина: %s",
-		label, pattern, expiresStr, cmd.Reason)
+		label, pattern, expiresStr, reason)
 	slog.Info("board: command accepted", "kind", "benign", "actor", label, "pattern", pattern, "fp", fingerprint)
-	emitCommandAccepted("benign", label, fingerprint, fmt.Sprintf("pattern=%s expires=%s reason=%s", pattern, expiresStr, cmd.Reason))
+	emitCommandAccepted("benign", label, fingerprint, fmt.Sprintf("pattern=%s expires=%s reason=%s", pattern, expiresStr, reason))
 	c.replyThread(ctx, threadID, msg)
 }
 
