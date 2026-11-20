@@ -242,9 +242,64 @@ func extractThreadID(raw json.RawMessage) string {
 }
 
 func formatBody(f detector.Finding, enrichment *sink.Enrichment) string {
+	switch f.GroupEvent {
+	case detector.GroupEventUpdate:
+		return formatGroupUpdate(f)
+	case detector.GroupEventClosed:
+		return formatGroupClosed(f)
+	}
+	// GroupEventOpen and GroupEventNone (old path) share the full format.
+	return formatFullBody(f, enrichment)
+}
+
+func formatGroupUpdate(f detector.Finding) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "**Обновление группы:** %d событий", f.GroupCount)
+	if f.GroupActorKey != "" {
+		fmt.Fprintf(&sb, ", актор: `%s`", f.GroupActorKey)
+	}
+	if len(f.GroupObjects) > 0 {
+		fmt.Fprintf(&sb, "  \n**Объекты:** %s", strings.Join(f.GroupObjects, ", "))
+	}
+	if len(f.Evidence) > 0 {
+		sb.WriteString("\n```\n")
+		for _, e := range f.Evidence {
+			sb.WriteString(e)
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("```")
+	}
+	return sb.String()
+}
+
+func formatGroupClosed(f detector.Finding) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "**Группа закрыта.** Итого: %d событий", f.GroupCount)
+	if f.GroupActorKey != "" {
+		fmt.Fprintf(&sb, ", актор: `%s`", f.GroupActorKey)
+	}
+	if len(f.GroupObjects) > 0 {
+		fmt.Fprintf(&sb, "  \n**Объекты:** %s", strings.Join(f.GroupObjects, ", "))
+	}
+	sb.WriteString("\n\n---\n*Используй `/quiet <duration> <reason>` чтобы заглушить следующую группу.*")
+	return sb.String()
+}
+
+func formatFullBody(f detector.Finding, enrichment *sink.Enrichment) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**Источник:** %s  \n**Правило:** %s  \n**Серьёзность:** %s\n\n",
 		f.Source, f.RuleID, strings.ToUpper(f.Severity))
+
+	// Group info for group_open events.
+	if f.GroupEvent == detector.GroupEventOpen {
+		if f.GroupActorKey != "" {
+			fmt.Fprintf(&sb, "**Актор:** `%s`\n", f.GroupActorKey)
+		}
+		if len(f.GroupObjects) > 0 {
+			fmt.Fprintf(&sb, "**Объекты:** %s\n", strings.Join(f.GroupObjects, ", "))
+		}
+		sb.WriteByte('\n')
+	}
 
 	if len(f.Evidence) > 0 {
 		sb.WriteString("**Улики:**\n```\n")

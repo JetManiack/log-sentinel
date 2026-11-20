@@ -81,6 +81,37 @@ type PollHighWater struct {
 	LastEnd    time.Time `gorm:"not null"`
 }
 
+// GroupWindow is a tumbling burst-grouping window. It is keyed by (group_fp),
+// a hash of (rule_id + actor_key) or (rule_id + source) when actor_fields is
+// empty. All events matching the same group_fp within [first_at, open_until]
+// belong to this group. A new row is created when no active window exists.
+type GroupWindow struct {
+	ID            uint       `gorm:"primarykey"`
+	GroupFP       string     `gorm:"uniqueIndex:idx_gw_active;not null"`
+	RuleID        string     `gorm:"not null"`
+	Severity      string     `gorm:"not null"`
+	Source        string     `gorm:"not null"`
+	ActorKey      string     `gorm:"not null"`
+	OpenUntil     time.Time  `gorm:"uniqueIndex:idx_gw_active;not null"`
+	Count         int        `gorm:"not null;default:1"`
+	ObjectSamples string     `gorm:"type:text"` // JSON array, capped at SampleObjectsMax
+	FirstAt       time.Time  `gorm:"not null"`
+	LastAt        time.Time  `gorm:"not null"`
+	BoardThreadID string
+	ClosedAt      *time.Time
+}
+
+// SeenEvent records event IDs for cross-restart exact dedup within a rolling TTL.
+// EventID is either the audit ID field or hash(_time + _stream_id + _msg).
+type SeenEvent struct {
+	ID     uint      `gorm:"primarykey"`
+	RuleID string    `gorm:"uniqueIndex:idx_seen;not null"`
+	Source string    `gorm:"uniqueIndex:idx_seen;not null"`
+	// EventID is the dedup key; hashed to a fixed-length string.
+	EventID string    `gorm:"uniqueIndex:idx_seen;not null"`
+	SeenAt  time.Time `gorm:"index;not null"`
+}
+
 // DB wraps a gorm.DB with sentinel-specific helpers.
 type DB struct {
 	g *gorm.DB
@@ -105,6 +136,8 @@ func Open(dsn string) (*DB, error) {
 		&TemplateBaseline{},
 		&ProcessedReply{},
 		&PollHighWater{},
+		&GroupWindow{},
+		&SeenEvent{},
 	); err != nil {
 		return nil, fmt.Errorf("state: migrate: %w", err)
 	}
@@ -331,4 +364,108 @@ func (d *DB) MarkReplyProcessed(replyID string) (bool, error) {
 		return false, result.Error
 	}
 	return true, nil
+}
+
+// ActiveGroupWindow returns the open GroupWindow for groupFP whose window has
+// not yet expired. Returns (nil, nil) when none exists.
+func (d *DB) ActiveGroupWindow(groupFP string) (*GroupWindow, error) {
+	var gw GroupWindow
+	err := d.g.Where("group_fp = ? AND open_until > ? AND closed_at IS NULL", groupFP, time.Now()).
+		First(&gw).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &gw, nil
+}
+
+// OpenGroupWindow creates a new GroupWindow for the given groupFP.
+func (d *DB) OpenGroupWindow(groupFP, ruleID, severity, source, actorKey string, openUntil time.Time, objectSamples string) (*GroupWindow, error) {
+	now := time.Now()
+	gw := GroupWindow{
+		GroupFP:       groupFP,
+		RuleID:        ruleID,
+		Severity:      severity,
+		Source:        source,
+		ActorKey:      actorKey,
+		OpenUntil:     openUntil,
+		Count:         1,
+		ObjectSamples: objectSamples,
+		FirstAt:       now,
+		LastAt:        now,
+	}
+	if err := d.g.Create(&gw).Error; err != nil {
+		return nil, err
+	}
+	return &gw, nil
+}
+
+// IncrGroupWindow increments count, updates last_at, and merges new object
+// samples (up to max) into an existing GroupWindow row. Returns the updated row.
+func (d *DB) IncrGroupWindow(id uint, objectSamples string) (*GroupWindow, error) {
+	updates := map[string]any{
+		"count":          gorm.Expr("count + 1"),
+		"last_at":        time.Now(),
+		"object_samples": objectSamples,
+	}
+	if err := d.g.Model(&GroupWindow{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+	var gw GroupWindow
+	if err := d.g.First(&gw, id).Error; err != nil {
+		return nil, err
+	}
+	return &gw, nil
+}
+
+// SetGroupWindowThread stores the board thread ID on a GroupWindow row.
+func (d *DB) SetGroupWindowThread(id uint, threadID string) error {
+	return d.g.Model(&GroupWindow{}).Where("id = ?", id).
+		Update("board_thread_id", threadID).Error
+}
+
+// CloseGroupWindow marks a GroupWindow as closed.
+func (d *DB) CloseGroupWindow(id uint) error {
+	now := time.Now()
+	return d.g.Model(&GroupWindow{}).Where("id = ?", id).
+		Update("closed_at", now).Error
+}
+
+// ExpiredGroupWindows returns all GroupWindow rows whose open_until has passed
+// and that have not yet been closed.
+func (d *DB) ExpiredGroupWindows() ([]GroupWindow, error) {
+	var rows []GroupWindow
+	err := d.g.Where("open_until <= ? AND closed_at IS NULL", time.Now()).Find(&rows).Error
+	return rows, err
+}
+
+// HasSeenEvent returns true if (ruleID, source, eventID) has been recorded
+// within the given TTL.
+func (d *DB) HasSeenEvent(ruleID, source, eventID string, ttl time.Duration) (bool, error) {
+	var se SeenEvent
+	cutoff := time.Now().Add(-ttl)
+	err := d.g.Where("rule_id = ? AND source = ? AND event_id = ? AND seen_at > ?",
+		ruleID, source, eventID, cutoff).First(&se).Error
+	if err == gorm.ErrRecordNotFound {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// MarkEventSeen records eventID so future calls to HasSeenEvent return true.
+// If the event was already recorded (outside the TTL), it updates seen_at.
+func (d *DB) MarkEventSeen(ruleID, source, eventID string) error {
+	se := SeenEvent{RuleID: ruleID, Source: source, EventID: eventID, SeenAt: time.Now()}
+	return d.g.
+		Where(SeenEvent{RuleID: ruleID, Source: source, EventID: eventID}).
+		Assign(SeenEvent{SeenAt: time.Now()}).
+		FirstOrCreate(&se).Error
+}
+
+// PurgeExpiredSeenEvents deletes SeenEvent rows older than the given TTL.
+func (d *DB) PurgeExpiredSeenEvents(ttl time.Duration) error {
+	cutoff := time.Now().Add(-ttl)
+	return d.g.Where("seen_at < ?", cutoff).Delete(&SeenEvent{}).Error
 }
