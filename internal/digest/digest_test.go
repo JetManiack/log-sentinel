@@ -47,12 +47,12 @@ func TestBuildDigestEmpty(t *testing.T) {
 func TestBuildDigestCounts(t *testing.T) {
 	since := time.Now().Add(-24 * time.Hour)
 	until := time.Now()
-	findings := []state.DigestFinding{
+	entries := []state.DigestEntry{
 		{RuleID: "r1", Severity: "critical", Source: "local", LastFiredAt: until.Add(-1 * time.Hour)},
 		{RuleID: "r2", Severity: "high", Source: "local", LastFiredAt: until.Add(-2 * time.Hour)},
 		{RuleID: "r3", Severity: "high", Source: "remote", LastFiredAt: until.Add(-3 * time.Hour)},
 	}
-	title, body := buildDigest(findings, since, until)
+	title, body := buildDigest(entries, since, until)
 	if !strings.Contains(title, "3 событий") {
 		t.Errorf("title should mention count: %s", title)
 	}
@@ -64,14 +64,38 @@ func TestBuildDigestCounts(t *testing.T) {
 	}
 }
 
+func TestBuildDigestGrouped(t *testing.T) {
+	since := time.Now().Add(-10 * time.Minute)
+	until := time.Now()
+	entries := []state.DigestEntry{
+		{
+			RuleID:        "rbac-grant",
+			Severity:      "high",
+			Source:        "k8s-audit",
+			LastFiredAt:   since.Add(5 * time.Minute),
+			GroupCount:    47,
+			GroupActorKey: "system:kube-controller-manager",
+			GroupFirstAt:  since.Add(1 * time.Minute),
+			GroupLastAt:   since.Add(9 * time.Minute),
+		},
+	}
+	_, body := buildDigest(entries, since, until)
+	if !strings.Contains(body, "47 событий") {
+		t.Errorf("body should contain event count: %s", body)
+	}
+	if !strings.Contains(body, "system:kube-controller-manager") {
+		t.Errorf("body should contain actor key: %s", body)
+	}
+}
+
 func TestBuildDigestTruncation(t *testing.T) {
 	since := time.Now().Add(-24 * time.Hour)
 	until := time.Now()
-	findings := make([]state.DigestFinding, 25)
-	for i := range findings {
-		findings[i] = state.DigestFinding{RuleID: "r", Severity: "low", Source: "s", LastFiredAt: until}
+	entries := make([]state.DigestEntry, 25)
+	for i := range entries {
+		entries[i] = state.DigestEntry{RuleID: "r", Severity: "low", Source: "s", LastFiredAt: until}
 	}
-	_, body := buildDigest(findings, since, until)
+	_, body := buildDigest(entries, since, until)
 	if !strings.Contains(body, "ещё") {
 		t.Errorf("body should mention truncation: %s", body)
 	}

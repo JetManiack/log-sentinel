@@ -24,10 +24,6 @@ type Finding struct {
 	FirstFiredAt time.Time `gorm:"not null"`
 	LastFiredAt  time.Time `gorm:"not null"`
 	QuietUntil   time.Time `gorm:"index"`
-	// ResolvedAt is set when the board thread for this finding is resolved.
-	ResolvedAt *time.Time
-	// BoardThreadID is the external_id used when creating board threads.
-	BoardThreadID string
 }
 
 // BenignOverride is an operator- or agent-acknowledged benign pattern.
@@ -97,7 +93,6 @@ type GroupWindow struct {
 	ObjectSamples string     `gorm:"type:text"` // JSON array, capped at SampleObjectsMax
 	FirstAt       time.Time  `gorm:"not null"`
 	LastAt        time.Time  `gorm:"not null"`
-	BoardThreadID string
 	ClosedAt      *time.Time
 }
 
@@ -188,23 +183,6 @@ func (d *DB) SetQuiet(fingerprint string, until time.Time) error {
 		Update("quiet_until", until).Error
 }
 
-// SetBoardThread sets the board thread external_id for a fingerprint.
-func (d *DB) SetBoardThread(fingerprint, threadID string) error {
-	return d.g.Model(&Finding{}).
-		Where("fingerprint = ?", fingerprint).
-		Update("board_thread_id", threadID).Error
-}
-
-// BoardThreadID returns the board thread external_id for a fingerprint, or "".
-func (d *DB) BoardThreadID(fingerprint string) (string, error) {
-	var f Finding
-	err := d.g.Select("board_thread_id").Where("fingerprint = ?", fingerprint).First(&f).Error
-	if err == gorm.ErrRecordNotFound {
-		return "", nil
-	}
-	return f.BoardThreadID, err
-}
-
 // SeenDomain returns true if the domain has been seen for this pod before.
 func (d *DB) SeenDomain(namespace, workload, domain string) (bool, error) {
 	var b DNSBaseline
@@ -246,81 +224,61 @@ func (d *DB) AddBenignOverride(pattern, reason, author string, expiresAt time.Ti
 	return d.g.Create(&b).Error
 }
 
-// AllBoardThreadIDs returns a map of fingerprint → boardThreadID for all findings
-// that have a board thread assigned.
-func (d *DB) AllBoardThreadIDs() (map[string]string, error) {
-	var findings []Finding
-	err := d.g.Select("fingerprint, board_thread_id").
-		Where("board_thread_id != ''").Find(&findings).Error
-	if err != nil {
-		return nil, err
-	}
-	m := make(map[string]string, len(findings))
-	for _, f := range findings {
-		m[f.Fingerprint] = f.BoardThreadID
-	}
-	return m, nil
-}
-
-// FindingSeverity returns the severity stored for a fingerprint.
-func (d *DB) FindingSeverity(fingerprint string) (string, error) {
-	var f Finding
-	err := d.g.Select("severity").Where("fingerprint = ?", fingerprint).First(&f).Error
-	if err != nil {
-		return "", err
-	}
-	return f.Severity, nil
-}
-
-// FindingRuleID returns the rule_id stored for a fingerprint.
-func (d *DB) FindingRuleID(fingerprint string) (string, error) {
-	var f Finding
-	err := d.g.Select("rule_id").Where("fingerprint = ?", fingerprint).First(&f).Error
-	if err != nil {
-		return "", err
-	}
-	return f.RuleID, nil
-}
-
-// FindingSource returns the log source name stored for a fingerprint.
-func (d *DB) FindingSource(fingerprint string) (string, error) {
-	var f Finding
-	err := d.g.Select("source").Where("fingerprint = ?", fingerprint).First(&f).Error
-	if err != nil {
-		return "", err
-	}
-	return f.Source, nil
-}
-
-// DigestFinding is a read-only projection used by the daily digest.
-type DigestFinding struct {
+// DigestEntry combines Finding data enriched with GroupWindow data for the daily digest.
+type DigestEntry struct {
 	Fingerprint string
 	RuleID      string
 	Severity    string
 	Source      string
 	LastFiredAt time.Time
+	// Set when a GroupWindow exists for this fingerprint (group_fp == fingerprint).
+	GroupCount    int
+	GroupActorKey string
+	GroupFirstAt  time.Time
+	GroupLastAt   time.Time
 }
 
-// FindingsSince returns all findings that fired at or after since, ordered by
-// severity (critical first) then last_fired_at descending.
-func (d *DB) FindingsSince(since time.Time) ([]DigestFinding, error) {
-	var rows []Finding
+// DigestEntries returns all findings since `since`, enriched with GroupWindow
+// data where available. Results are ordered by severity then last_fired_at descending.
+func (d *DB) DigestEntries(since time.Time) ([]DigestEntry, error) {
+	var findings []Finding
 	err := d.g.
 		Select("fingerprint, rule_id, severity, source, last_fired_at").
 		Where("last_fired_at >= ?", since).
 		Order("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, last_fired_at DESC").
-		Find(&rows).Error
+		Find(&findings).Error
 	if err != nil {
 		return nil, err
 	}
-	out := make([]DigestFinding, len(rows))
-	for i, r := range rows {
-		out[i] = DigestFinding{
-			Fingerprint: r.Fingerprint,
-			RuleID:      r.RuleID,
-			Severity:    r.Severity,
-			Source:      r.Source,
-			LastFiredAt: r.LastFiredAt,
+
+	// Fetch GroupWindows that overlap the period.
+	var windows []GroupWindow
+	if err := d.g.Where("first_at >= ? OR last_at >= ?", since, since).Find(&windows).Error; err != nil {
+		return nil, err
+	}
+	// Index by group_fp, keeping the window with the highest count per fp.
+	gwByFP := make(map[string]*GroupWindow, len(windows))
+	for i := range windows {
+		gw := &windows[i]
+		if existing, ok := gwByFP[gw.GroupFP]; !ok || gw.Count > existing.Count {
+			gwByFP[gw.GroupFP] = gw
+		}
+	}
+
+	out := make([]DigestEntry, len(findings))
+	for i, f := range findings {
+		out[i] = DigestEntry{
+			Fingerprint: f.Fingerprint,
+			RuleID:      f.RuleID,
+			Severity:    f.Severity,
+			Source:      f.Source,
+			LastFiredAt: f.LastFiredAt,
+		}
+		if gw, ok := gwByFP[f.Fingerprint]; ok {
+			out[i].GroupCount = gw.Count
+			out[i].GroupActorKey = gw.ActorKey
+			out[i].GroupFirstAt = gw.FirstAt
+			out[i].GroupLastAt = gw.LastAt
 		}
 	}
 	return out, nil
@@ -418,12 +376,6 @@ func (d *DB) IncrGroupWindow(id uint, objectSamples string) (*GroupWindow, error
 		return nil, err
 	}
 	return &gw, nil
-}
-
-// SetGroupWindowThread stores the board thread ID on a GroupWindow row.
-func (d *DB) SetGroupWindowThread(id uint, threadID string) error {
-	return d.g.Model(&GroupWindow{}).Where("id = ?", id).
-		Update("board_thread_id", threadID).Error
 }
 
 // CloseGroupWindow marks a GroupWindow as closed.

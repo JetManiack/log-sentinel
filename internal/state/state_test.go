@@ -78,34 +78,6 @@ func TestSetQuietExpired(t *testing.T) {
 	}
 }
 
-func TestBoardThread(t *testing.T) {
-	db := openTestDB(t)
-	fp := "fp1234567890abcd"
-	if _, err := db.Upsert(fp, "r", "medium", "s"); err != nil {
-		t.Fatal(err)
-	}
-
-	// No thread yet.
-	id, err := db.BoardThreadID(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "" {
-		t.Errorf("expected empty thread ID, got %q", id)
-	}
-
-	// Set thread.
-	if err := db.SetBoardThread(fp, "thread-123"); err != nil {
-		t.Fatal(err)
-	}
-	id, err = db.BoardThreadID(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "thread-123" {
-		t.Errorf("want thread-123, got %q", id)
-	}
-}
 
 func TestDNSBaseline(t *testing.T) {
 	db := openTestDB(t)
@@ -165,26 +137,6 @@ func TestBenignOverride(t *testing.T) {
 	}
 }
 
-func TestAllBoardThreadIDs(t *testing.T) {
-	db := openTestDB(t)
-
-	fp1, fp2 := "fp0000000000001a", "fp0000000000002b"
-	db.Upsert(fp1, "r1", "high", "local")   //nolint:errcheck
-	db.Upsert(fp2, "r2", "medium", "local") //nolint:errcheck
-	db.SetBoardThread(fp1, "thread-A")       //nolint:errcheck
-	// fp2 has no thread.
-
-	ids, err := db.AllBoardThreadIDs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ids[fp1] != "thread-A" {
-		t.Errorf("fp1: want thread-A, got %q", ids[fp1])
-	}
-	if _, ok := ids[fp2]; ok {
-		t.Error("fp2 should not appear (no thread set)")
-	}
-}
 
 func TestMarkReplyProcessed(t *testing.T) {
 	db := openTestDB(t)
@@ -208,7 +160,7 @@ func TestMarkReplyProcessed(t *testing.T) {
 	}
 }
 
-func TestFindingsSince(t *testing.T) {
+func TestDigestEntries(t *testing.T) {
 	db := openTestDB(t)
 
 	now := time.Now()
@@ -217,28 +169,72 @@ func TestFindingsSince(t *testing.T) {
 	db.Upsert(fp1, "r1", "critical", "local") //nolint:errcheck
 	db.Upsert(fp2, "r2", "low", "remote")     //nolint:errcheck
 
-	results, err := db.FindingsSince(now.Add(-time.Minute))
+	results, err := db.DigestEntries(now.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 2 {
-		t.Fatalf("want 2 findings, got %d", len(results))
+		t.Fatalf("want 2 entries, got %d", len(results))
 	}
 	// First result should be critical (ordered by severity).
 	if results[0].Severity != "critical" {
 		t.Errorf("want critical first, got %q", results[0].Severity)
 	}
+
+	// Entries without a GroupWindow should have zero GroupCount.
+	for _, r := range results {
+		if r.GroupCount != 0 {
+			t.Errorf("fp %s: want GroupCount=0 (no window), got %d", r.Fingerprint, r.GroupCount)
+		}
+	}
 }
 
-func TestFindingsSinceEmpty(t *testing.T) {
+func TestDigestEntriesEmpty(t *testing.T) {
 	db := openTestDB(t)
 
-	// No findings at all.
-	results, err := db.FindingsSince(time.Now().Add(-time.Hour))
+	results, err := db.DigestEntries(time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 0 {
 		t.Errorf("want 0, got %d", len(results))
 	}
+}
+
+func TestDigestEntriesGrouped(t *testing.T) {
+	db := openTestDB(t)
+
+	fp := "cc00000000000003"
+	db.Upsert(fp, "r1", "high", "local") //nolint:errcheck
+
+	// Open a GroupWindow for this finding.
+	now := time.Now()
+	gw, err := db.OpenGroupWindow(fp, "r1", "high", "local", "alice", now.Add(10*time.Minute), `["role-x"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err = db.IncrGroupWindow(gw.ID, `["role-x","role-y"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err = db.IncrGroupWindow(gw.ID, `["role-x","role-y","role-z"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := db.DigestEntries(now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(results))
+	}
+	r := results[0]
+	if r.GroupCount != 3 {
+		t.Errorf("want GroupCount=3, got %d", r.GroupCount)
+	}
+	if r.GroupActorKey != "alice" {
+		t.Errorf("want GroupActorKey=alice, got %q", r.GroupActorKey)
+	}
+	_ = gw
 }

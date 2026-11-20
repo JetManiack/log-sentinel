@@ -22,17 +22,11 @@ type Config struct {
 	// LLM configures the optional triage layer.
 	LLM LLMConfig `yaml:"llm"`
 
-	// Sinks configure where findings are sent.
-	Sinks SinksConfig `yaml:"sinks"`
-
 	// Detector configures the deterministic detection layer.
 	Detector DetectorConfig `yaml:"detector"`
 
 	// Digest configures the daily low-severity digest.
 	Digest DigestConfig `yaml:"digest"`
-
-	// Commands configures the board reply command parser.
-	Commands CommandsConfig `yaml:"commands"`
 }
 
 // LogSource is a single log backend.
@@ -74,34 +68,6 @@ type LLMConfig struct {
 	// PromptsDir is an optional directory of YAML blueprint overrides.
 	// Files here replace built-in prompts by their `name` field.
 	PromptsDir string `yaml:"prompts_dir"`
-}
-
-// SinksConfig lists the output channels.
-type SinksConfig struct {
-	// StdoutJSON writes every finding as a JSON line to stdout (always on).
-	StdoutJSON bool `yaml:"stdout_json"`
-
-	// Board configures the coordination board sink.
-	Board BoardSinkConfig `yaml:"board"`
-
-	// Webhook is an optional generic HTTP sink.
-	Webhook WebhookSinkConfig `yaml:"webhook"`
-}
-
-// BoardSinkConfig configures the board MCP client.
-type BoardSinkConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"`
-	Token   string `yaml:"token"`
-	// MinSeverity is the minimum severity to post; below this → digest only.
-	MinSeverity string `yaml:"min_severity"`
-}
-
-// WebhookSinkConfig is a generic HTTP POST sink.
-type WebhookSinkConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"`
-	Token   string `yaml:"token"`
 }
 
 // DetectorConfig controls the deterministic detection layer.
@@ -185,32 +151,6 @@ type DigestConfig struct {
 	// haven't appeared in a previous digest (default 14d). Longer means more
 	// catch-up after an outage; shorter means less noise from old data.
 	NewLookback time.Duration `yaml:"new_lookback"`
-}
-
-// Commands controls the /quiet /benign /unquiet command parser.
-type CommandsConfig struct {
-	// AllowedActors is a list of board actor IDs allowed to issue commands.
-	AllowedActors []string `yaml:"allowed_actors"`
-	// CriticalMuteActors can mute critical findings (subset of AllowedActors).
-	CriticalMuteActors []string `yaml:"critical_mute_actors"`
-	// ActorNames maps stable actor IDs to human-readable display names for
-	// confirmation messages. Authorization always uses the ID; this is display-only.
-	ActorNames map[string]string `yaml:"actor_names"`
-	// MaxAgentQuietDays is the max quiet duration an agent (non-critical-mute actor)
-	// can set via /quiet (default 7).
-	MaxAgentQuietDays int `yaml:"max_agent_quiet_days"`
-	// MaxAgentBenignDays is how long an agent's /benign entry lasts without
-	// operator confirmation (default 30).
-	MaxAgentBenignDays int `yaml:"max_agent_benign_days"`
-}
-
-// ActorLabel returns the display name for actorID if configured in ActorNames,
-// otherwise falls back to the raw ID.
-func (c CommandsConfig) ActorLabel(actorID string) string {
-	if name, ok := c.ActorNames[actorID]; ok && name != "" {
-		return name
-	}
-	return actorID
 }
 
 // Load reads and parses the YAML config at path, then merges any rules from
@@ -326,9 +266,6 @@ func setDefaults(cfg *Config) {
 	if cfg.State == "" {
 		cfg.State = "data/sentinel.db"
 	}
-	if cfg.Sinks.StdoutJSON {
-		// always-on; nothing to default
-	}
 	d := &cfg.Detector
 	if d.Interval == 0 {
 		d.Interval = time.Minute
@@ -378,11 +315,5 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Digest.NewLookback == 0 {
 		cfg.Digest.NewLookback = 14 * 24 * time.Hour
-	}
-	if cfg.Commands.MaxAgentQuietDays == 0 {
-		cfg.Commands.MaxAgentQuietDays = 7
-	}
-	if cfg.Commands.MaxAgentBenignDays == 0 {
-		cfg.Commands.MaxAgentBenignDays = 30
 	}
 }

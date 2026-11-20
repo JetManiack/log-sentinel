@@ -11,6 +11,7 @@ import (
 
 	"github.com/JetManiack/log-sentinel/internal/config"
 	"github.com/JetManiack/log-sentinel/internal/masker"
+	"github.com/JetManiack/log-sentinel/internal/metrics"
 	"github.com/JetManiack/log-sentinel/internal/state"
 )
 
@@ -115,6 +116,7 @@ func (r *Runner) poll(ctx context.Context) {
 					continue
 				}
 				if seen {
+					metrics.EventsDedupedTotal.WithLabelValues(rule.ID, srcName).Inc()
 					continue
 				}
 				if err := r.db.MarkEventSeen(rule.ID, srcName, evID); err != nil {
@@ -204,6 +206,7 @@ func (r *Runner) poll(ctx context.Context) {
 						slog.Warn("db IncrGroupWindow error", "err", err)
 						continue
 					}
+					metrics.GroupEventsTotal.WithLabelValues(rule.ID, srcName).Inc()
 					r.out <- Finding{
 						Fingerprint:   groupFP,
 						RuleID:        rule.ID,
@@ -232,6 +235,7 @@ func (r *Runner) poll(ctx context.Context) {
 					if _, err := r.db.Upsert(groupFP, rule.ID, rule.Severity, srcName); err != nil {
 						slog.Warn("db Upsert error", "err", err)
 					}
+					metrics.FindingsTotal.WithLabelValues(rule.ID, srcName, rule.Severity).Inc()
 					r.out <- Finding{
 						Fingerprint:   groupFP,
 						RuleID:        rule.ID,
@@ -281,6 +285,7 @@ func (r *Runner) closeExpiredWindows(now time.Time) {
 		if gw.Count <= 1 {
 			continue
 		}
+		metrics.GroupsClosedTotal.WithLabelValues(gw.RuleID, gw.Source).Inc()
 		desc := ""
 		if rule := r.ruleByID(gw.RuleID); rule != nil {
 			desc = rule.Description
@@ -443,6 +448,7 @@ func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 				continue
 			}
 			r.db.Upsert(fp, "fail-open", SeverityMedium, srcName) //nolint:errcheck
+			metrics.FindingsTotal.WithLabelValues("fail-open", srcName, SeverityMedium).Inc()
 			r.out <- Finding{
 				Fingerprint: fp,
 				RuleID:      "fail-open",
@@ -465,6 +471,7 @@ func (r *Runner) emitDetectorError(ctx context.Context, rule config.Rule, srcNam
 		return
 	}
 	r.db.Upsert(fp, "detector-error", SeverityHigh, srcName) //nolint:errcheck
+	metrics.FindingsTotal.WithLabelValues("detector-error", srcName, SeverityHigh).Inc()
 	r.out <- Finding{
 		Fingerprint: fp,
 		RuleID:      "detector-error",
