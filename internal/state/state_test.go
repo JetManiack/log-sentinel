@@ -189,6 +189,52 @@ func TestDigestEntries(t *testing.T) {
 	}
 }
 
+func TestMarkDigested(t *testing.T) {
+	db := openTestDB(t)
+
+	now := time.Now()
+	fp1 := "dd00000000000001"
+	fp2 := "ee00000000000002"
+	fp3 := "ff00000000000003"
+	db.Upsert(fp1, "r1", "high", "local")   //nolint:errcheck
+	db.Upsert(fp2, "r2", "medium", "local") //nolint:errcheck
+	db.Upsert(fp3, "r3", "low", "local")    //nolint:errcheck
+
+	// All three are novel initially.
+	results, err := db.DigestEntries(now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("before mark: want 3 novel entries, got %d", len(results))
+	}
+
+	// Mark fp1 and fp2 as digested.
+	if err := db.MarkDigested([]string{fp1, fp2}); err != nil {
+		t.Fatalf("MarkDigested: %v", err)
+	}
+
+	// Now only fp3 should be novel.
+	results, err = db.DigestEntries(now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("after mark: want 1 novel entry, got %d", len(results))
+	}
+	if results[0].Fingerprint != fp3 {
+		t.Errorf("want fp3 remaining, got %q", results[0].Fingerprint)
+	}
+
+	// MarkDigested with empty slice is a no-op.
+	if err := db.MarkDigested(nil); err != nil {
+		t.Errorf("MarkDigested(nil): %v", err)
+	}
+	if err := db.MarkDigested([]string{}); err != nil {
+		t.Errorf("MarkDigested([]): %v", err)
+	}
+}
+
 func TestDigestEntriesEmpty(t *testing.T) {
 	db := openTestDB(t)
 

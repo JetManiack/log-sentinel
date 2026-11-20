@@ -16,14 +16,19 @@ import (
 
 // Finding records a fired detector finding for dedup / quiet-window tracking.
 type Finding struct {
-	ID           uint      `gorm:"primarykey"`
-	Fingerprint  string    `gorm:"uniqueIndex;not null"`
-	Severity     string    `gorm:"not null"`
-	RuleID       string    `gorm:"not null"`
-	Source       string    `gorm:"not null"`
-	FirstFiredAt time.Time `gorm:"not null"`
-	LastFiredAt  time.Time `gorm:"not null"`
-	QuietUntil   time.Time `gorm:"index"`
+	ID           uint       `gorm:"primarykey"`
+	Fingerprint  string     `gorm:"uniqueIndex;not null"`
+	Severity     string     `gorm:"not null"`
+	RuleID       string     `gorm:"not null"`
+	Source       string     `gorm:"not null"`
+	FirstFiredAt time.Time  `gorm:"not null"`
+	LastFiredAt  time.Time  `gorm:"not null"`
+	QuietUntil   time.Time  `gorm:"index"`
+	// DigestedAt is set when the finding is first included in a daily digest.
+	// NULL means it has never appeared in a digest (novel). DigestEntries
+	// only returns novel findings, so a repeated pattern is not re-surfaced
+	// once the operator has seen it.
+	DigestedAt *time.Time `gorm:"index"`
 }
 
 // BenignOverride is an operator- or agent-acknowledged benign pattern.
@@ -238,13 +243,15 @@ type DigestEntry struct {
 	GroupLastAt   time.Time
 }
 
-// DigestEntries returns all findings since `since`, enriched with GroupWindow
-// data where available. Results are ordered by severity then last_fired_at descending.
+// DigestEntries returns novel (never-digested) findings active since `since`,
+// enriched with GroupWindow data where available. A finding is "novel" when
+// digested_at IS NULL — it has not appeared in a previous daily digest.
+// Results are ordered by severity then last_fired_at descending.
 func (d *DB) DigestEntries(since time.Time) ([]DigestEntry, error) {
 	var findings []Finding
 	err := d.g.
 		Select("fingerprint, rule_id, severity, source, last_fired_at").
-		Where("last_fired_at >= ?", since).
+		Where("digested_at IS NULL AND last_fired_at >= ?", since).
 		Order("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, last_fired_at DESC").
 		Find(&findings).Error
 	if err != nil {
@@ -420,4 +427,18 @@ func (d *DB) MarkEventSeen(ruleID, source, eventID string) error {
 func (d *DB) PurgeExpiredSeenEvents(ttl time.Duration) error {
 	cutoff := time.Now().Add(-ttl)
 	return d.g.Where("seen_at < ?", cutoff).Delete(&SeenEvent{}).Error
+}
+
+// MarkDigested sets digested_at = now for all findings whose fingerprint is in
+// fps. It is called after the daily digest is emitted so those findings are
+// excluded from future digests. No-op for fingerprints that are already
+// digested or not found.
+func (d *DB) MarkDigested(fingerprints []string) error {
+	if len(fingerprints) == 0 {
+		return nil
+	}
+	now := time.Now()
+	return d.g.Model(&Finding{}).
+		Where("fingerprint IN ? AND digested_at IS NULL", fingerprints).
+		Update("digested_at", now).Error
 }
