@@ -24,8 +24,12 @@ type FindingJSON struct {
 	Description string   `json:"description"`
 	Evidence    []string `json:"evidence,omitempty"`
 	// Grouping fields — only set when GroupEvent != GroupEventNone.
+	// group_event: "group_open" | "group_update" | "group_closed"
+	// Grafana rule matches msg:"finding" AND group_event to distinguish open vs closed.
+	GroupEvent    string   `json:"group_event,omitempty"`
+	GroupFP       string   `json:"group_fp,omitempty"`
+	GroupActor    string   `json:"actor,omitempty"`
 	GroupCount    int      `json:"group_count,omitempty"`
-	GroupActorKey string   `json:"group_actor,omitempty"`
 	GroupObjects  []string `json:"group_objects,omitempty"`
 	// Enrichment is set after the optional triage step.
 	Enrichment *Enrichment `json:"enrichment,omitempty"`
@@ -61,22 +65,31 @@ func NewStdout() *Stdout {
 // can alert on them.
 func (s *Stdout) Emit(f detector.Finding, enrichment *Enrichment) {
 	msg := "finding"
-	if f.GroupEvent == detector.GroupEventUpdate {
+	groupEvent := ""
+	switch f.GroupEvent {
+	case detector.GroupEventOpen:
+		groupEvent = "group_open"
+	case detector.GroupEventUpdate:
 		msg = "group_update"
+		groupEvent = "group_update"
+	case detector.GroupEventClosed:
+		groupEvent = "group_closed"
 	}
 	out := FindingJSON{
-		Time:          time.Now().UTC().Format(time.RFC3339),
-		Level:         slogLevel(f.Severity),
-		Msg:           msg,
-		Severity:      f.Severity,
-		RuleID:        f.RuleID,
-		Source:        f.Source,
-		Description:   f.Description,
-		Evidence:      f.Evidence,
-		GroupCount:    f.GroupCount,
-		GroupActorKey: f.GroupActorKey,
-		GroupObjects:  f.GroupObjects,
-		Enrichment:    enrichment,
+		Time:         time.Now().UTC().Format(time.RFC3339),
+		Level:        slogLevel(f.Severity),
+		Msg:          msg,
+		Severity:     f.Severity,
+		RuleID:       f.RuleID,
+		Source:       f.Source,
+		Description:  f.Description,
+		Evidence:     f.Evidence,
+		GroupEvent:   groupEvent,
+		GroupFP:      f.GroupFingerprint,
+		GroupActor:   f.GroupActorKey,
+		GroupCount:   f.GroupCount,
+		GroupObjects: f.GroupObjects,
+		Enrichment:   enrichment,
 	}
 	if err := s.enc.Encode(out); err != nil {
 		slog.Error("stdout sink encode error", "err", err)

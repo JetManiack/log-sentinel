@@ -216,11 +216,12 @@ func (r *Runner) poll(ctx context.Context) {
 						Evidence:      truncate(g.evidence, 10),
 						ContextLines:  truncate(ctxLines, ctxCfg.ContextLines),
 						FiredAt:       now,
-						GroupEvent:    GroupEventUpdate,
-						GroupCount:    gw.Count,
-						GroupActorKey: g.actorKey,
-						GroupObjects:  unmarshalSamples(gw.ObjectSamples),
-						GroupWindowID: gw.ID,
+						GroupEvent:       GroupEventUpdate,
+						GroupCount:       gw.Count,
+						GroupActorKey:    g.actorKey,
+						GroupObjects:     unmarshalSamples(gw.ObjectSamples),
+						GroupWindowID:    gw.ID,
+						GroupFingerprint: groupFP,
 					}
 				} else {
 					// No active window: open a new one.
@@ -245,11 +246,12 @@ func (r *Runner) poll(ctx context.Context) {
 						Evidence:      truncate(g.evidence, 10),
 						ContextLines:  truncate(ctxLines, ctxCfg.ContextLines),
 						FiredAt:       now,
-						GroupEvent:    GroupEventOpen,
-						GroupCount:    1,
-						GroupActorKey: g.actorKey,
-						GroupObjects:  objSamples,
-						GroupWindowID: gw.ID,
+						GroupEvent:       GroupEventOpen,
+						GroupCount:       1,
+						GroupActorKey:    g.actorKey,
+						GroupObjects:     objSamples,
+						GroupWindowID:    gw.ID,
+						GroupFingerprint: groupFP,
 					}
 				}
 			}
@@ -297,11 +299,12 @@ func (r *Runner) closeExpiredWindows(now time.Time) {
 			Source:        gw.Source,
 			Description:   desc,
 			FiredAt:       now,
-			GroupEvent:    GroupEventClosed,
-			GroupCount:    gw.Count,
-			GroupActorKey: gw.ActorKey,
-			GroupObjects:  unmarshalSamples(gw.ObjectSamples),
-			GroupWindowID: gw.ID,
+			GroupEvent:       GroupEventClosed,
+			GroupCount:       gw.Count,
+			GroupActorKey:    gw.ActorKey,
+			GroupObjects:     unmarshalSamples(gw.ObjectSamples),
+			GroupWindowID:    gw.ID,
+			GroupFingerprint: gw.GroupFP,
 		}
 	}
 }

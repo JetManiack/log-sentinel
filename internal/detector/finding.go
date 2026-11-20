@@ -48,6 +48,9 @@ type Finding struct {
 	GroupObjects []string
 	// GroupWindowID is the DB row ID of the GroupWindow; non-zero when grouped.
 	GroupWindowID uint
+	// GroupFingerprint is the hex fingerprint of the GroupWindow (rule+source+actor).
+	// Set for all GroupEvent values except GroupEventNone.
+	GroupFingerprint string
 }
 
 // GroupEvent classifies a grouped finding for the sinks.
