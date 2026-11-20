@@ -202,7 +202,36 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	if err := validateSeenEventTTL(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateSeenEventTTL ensures that seen_event_ttl is long enough to cover the
+// poll-overlap window. If it is shorter than window_before + interval, duplicate
+// events will slip through after a restart — exactly what SeenEvent dedup is
+// meant to prevent.
+func validateSeenEventTTL(cfg *Config) error {
+	d := &cfg.Detector
+	minTTL := d.WindowBefore + d.Interval
+	for _, r := range d.Rules {
+		gw := r.GroupWindow
+		if gw == 0 {
+			gw = d.GroupWindowDefault
+		}
+		if gw > minTTL {
+			minTTL = gw
+		}
+	}
+	if d.SeenEventTTL < minTTL {
+		return fmt.Errorf(
+			"config: seen_event_ttl (%s) must be >= window_before+interval and >= max(group_window) = %s; "+
+				"increase seen_event_ttl or reduce the windows to avoid duplicate findings after restart",
+			d.SeenEventTTL, minTTL,
+		)
+	}
+	return nil
 }
 
 // ruleFile is the top-level structure expected in each *.yaml under rules_dir.

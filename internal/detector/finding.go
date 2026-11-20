@@ -57,14 +57,13 @@ const (
 	// GroupEventNone is a non-grouped finding (old path, GroupWindowID == 0).
 	GroupEventNone GroupEvent = iota
 	// GroupEventOpen is emitted when the first event opens a new GroupWindow.
-	// Both stdout (as "finding") and board sink see it.
+	// stdout emits a "finding" line (triggers Grafana alert).
 	GroupEventOpen
 	// GroupEventUpdate is emitted when events arrive in an already-open window.
-	// Board sink replies to the existing thread; stdout emits "group_update"
-	// (NOT a "finding" line — no Grafana alert).
+	// stdout emits "group_update" (NOT a "finding" line — no Grafana alert).
 	GroupEventUpdate
 	// GroupEventClosed is emitted when a GroupWindow expires.
-	// Both stdout (as "finding") and board sink see it.
+	// stdout emits a "finding" line with final count + time range.
 	GroupEventClosed
 )
 
