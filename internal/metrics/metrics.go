@@ -34,4 +34,11 @@ var (
 		Name: "sentinel_events_deduped_total",
 		Help: "Log events skipped because their event_id was already seen.",
 	}, []string{"rule", "source"})
+
+	// MCPCallsTotal counts MCP tool calls by server, tool and result.
+	// result is one of: ok, error, denied (not in allowlist), capped (call_cap reached).
+	MCPCallsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "sentinel_mcp_calls_total",
+		Help: "MCP tool calls by server, tool and result (ok/error/denied/capped).",
+	}, []string{"server", "tool", "result"})
 )

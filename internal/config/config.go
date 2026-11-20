@@ -27,6 +27,38 @@ type Config struct {
 
 	// Digest configures the daily low-severity digest.
 	Digest DigestConfig `yaml:"digest"`
+
+	// MCP configures general-purpose MCP server clients used by the context
+	// collector and LLM verdict layer.
+	MCP MCPConfig `yaml:"mcp"`
+}
+
+// MCPConfig holds a list of named MCP server configurations.
+type MCPConfig struct {
+	Servers []MCPServer `yaml:"servers"`
+}
+
+// MCPServer is one MCP endpoint the sentinel may call.
+type MCPServer struct {
+	// Name is a short stable identifier used in logs and metrics.
+	Name string `yaml:"name"`
+	// URL is the base HTTP endpoint (Streamable HTTP transport).
+	URL string `yaml:"url"`
+	// Token / TokenFile / TokenEnv: first non-empty wins.
+	// Token is a literal bearer token (avoid committing secrets).
+	Token string `yaml:"token"`
+	// TokenFile is a path to a file whose first line is the bearer token.
+	TokenFile string `yaml:"token_file"`
+	// TokenEnv is an environment variable name holding the bearer token.
+	TokenEnv string `yaml:"token_env"`
+	// Timeout is the per-call deadline (default 30s).
+	Timeout time.Duration `yaml:"timeout"`
+	// Tools is the allowlist of tool names this client may call.
+	// Empty means nothing is callable (fail-safe default).
+	Tools []string `yaml:"tools"`
+	// CallCap is the maximum number of tool calls per request (default 10).
+	// Prevents runaway loops when used by the LLM verdict layer.
+	CallCap int `yaml:"call_cap"`
 }
 
 // LogSource is a single log backend.
@@ -315,5 +347,14 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Digest.NewLookback == 0 {
 		cfg.Digest.NewLookback = 14 * 24 * time.Hour
+	}
+	for i := range cfg.MCP.Servers {
+		s := &cfg.MCP.Servers[i]
+		if s.Timeout == 0 {
+			s.Timeout = 30 * time.Second
+		}
+		if s.CallCap == 0 {
+			s.CallCap = 10
+		}
 	}
 }
