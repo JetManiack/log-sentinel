@@ -85,7 +85,7 @@ func (r *Runner) fire(ctx context.Context, fireTime time.Time) {
 		return
 	}
 	if len(entries) == 0 {
-		slog.Debug("digest: no findings, skipping")
+		slog.Debug("digest: no novel findings, skipping")
 		return
 	}
 
@@ -100,6 +100,15 @@ func (r *Runner) fire(ctx context.Context, fireTime time.Time) {
 		"title": title,
 		"body":  body,
 	})
+
+	// Mark all included findings as digested so they don't reappear tomorrow.
+	fps := make([]string, len(entries))
+	for i, e := range entries {
+		fps[i] = e.Fingerprint
+	}
+	if err := r.db.MarkDigested(fps); err != nil {
+		slog.Warn("digest: mark digested", "err", err)
+	}
 }
 
 func buildDigest(entries []state.DigestEntry, since, until time.Time) (title, body string) {
