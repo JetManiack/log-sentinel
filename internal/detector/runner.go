@@ -2,7 +2,7 @@ package detector
 
 import (
 	"context"
-	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/JetManiack/log-sentinel/internal/config"
 	"github.com/JetManiack/log-sentinel/internal/masker"
+	"github.com/JetManiack/log-sentinel/internal/metrics"
 	"github.com/JetManiack/log-sentinel/internal/state"
 )
 
@@ -66,25 +67,29 @@ const pollOverlap = 5 * time.Second
 func (r *Runner) poll(ctx context.Context) {
 	now := time.Now()
 	interval := r.cfg.Detector.Interval
+	d := &r.cfg.Detector
+
+	// Close any GroupWindows that expired since the last poll, emitting
+	// group_closed findings for multi-event groups.
+	r.closeExpiredWindows(now)
 
 	for _, rule := range r.cfg.Detector.Rules {
+		groupWindow := rule.GroupWindow
+		if groupWindow == 0 {
+			groupWindow = d.GroupWindowDefault
+		}
+
 		clients := r.clientsForRule(rule)
 		for srcName, client := range clients {
-			// Use a per-(rule,source) high-water mark so events near the poll
-			// boundary are never dropped (defect #3: gap between polls).
 			start := r.db.PollStart(rule.ID, srcName, interval, pollOverlap)
 			ctxCfg := r.cfg.LLM
-			entries, err := client.queryRaw(ctx, rule.Query, start, now, 50)
+			entries, err := client.queryRaw(ctx, rule.Query, start, now, 200)
 			if err != nil {
-				// Fail loud: a broken rule query must be visible as a finding,
-				// not a silent warn. An operator watching stdout or the board
-				// will see it immediately.
 				slog.Error("detector query failed — rule may be producing no results",
 					"rule", rule.ID, "source", srcName, "err", err)
 				r.emitDetectorError(ctx, rule, srcName, err)
 				continue
 			}
-			// Always advance the high-water mark, even on empty results.
 			if err := r.db.SetPollEnd(rule.ID, srcName, now); err != nil {
 				slog.Warn("db setpollend error", "err", err)
 			}
@@ -92,37 +97,68 @@ func (r *Runner) poll(ctx context.Context) {
 				continue
 			}
 
-			// Sort entries by _time ascending so evidence is chronological and the
-			// LLM sees events in the correct order (VL does not guarantee order).
 			sort.Slice(entries, func(i, j int) bool {
 				return entries[i].Time < entries[j].Time
 			})
 
-			// Group entries by fingerprint key. key_fields → per-actor/object scope;
-			// no key_fields → hash of _msg (fail-safe: unique events don't dedup,
-			// identical events do — defect #1: unkeyed rules must not get 24h silence).
-			type group struct {
-				key      string
-				evidence []string
-				msgs     []string // _msg only, used for benign matching
-			}
-			groupMap := map[string]*group{}
+			// --- Per-event dedup via SeenEvent ---
+			var newEntries []vlEntry
 			for _, e := range entries {
-				key := ruleKey(rule, e)
-				g, ok := groupMap[key]
+				evID := EventID(
+					e.Tags[rule.AuditIDField],
+					e.Time,
+					e.Tags["_stream_id"],
+					e.Msg,
+				)
+				seen, err := r.db.HasSeenEvent(rule.ID, srcName, evID, d.SeenEventTTL)
+				if err != nil {
+					slog.Warn("db HasSeenEvent error", "err", err)
+					continue
+				}
+				if seen {
+					metrics.EventsDedupedTotal.WithLabelValues(rule.ID, srcName).Inc()
+					continue
+				}
+				if err := r.db.MarkEventSeen(rule.ID, srcName, evID); err != nil {
+					slog.Warn("db MarkEventSeen error", "err", err)
+				}
+				newEntries = append(newEntries, e)
+			}
+			if len(newEntries) == 0 {
+				continue
+			}
+
+			// --- Group by actor ---
+			type actorGroup struct {
+				actorKey string
+				evidence []string
+				msgs     []string // _msg only, for benign matching
+				objects  map[string]struct{}
+			}
+			groupMap := map[string]*actorGroup{}
+			objFields := objectFields(rule)
+			for _, e := range newEntries {
+				ak := actorKeyStr(rule, e)
+				g, ok := groupMap[ak]
 				if !ok {
-					g = &group{key: key}
-					groupMap[key] = g
+					g = &actorGroup{
+						actorKey: ak,
+						objects:  make(map[string]struct{}),
+					}
+					groupMap[ak] = g
 				}
 				g.evidence = append(g.evidence, client.mask.Redact(entryLine(e)))
-				// Benign matching uses _msg only: attacker-controlled fields such as
-				// objectRef.name must not influence whether a finding is suppressed.
 				g.msgs = append(g.msgs, client.mask.Redact(e.Msg))
+				for _, f := range objFields {
+					if v := e.Tags[f]; v != "" {
+						g.objects[v] = struct{}{}
+					}
+				}
 			}
 
 			// Fetch context lines once per rule/source (uses first entry's stream).
 			var ctxLines []string
-			if streamSelector := buildStreamSelector(entries[0].Tags); streamSelector != "" {
+			if streamSelector := buildStreamSelector(newEntries[0].Tags); streamSelector != "" {
 				ctxStart := now.Add(-ctxCfg.ContextWindow)
 				ctxEnd := now.Add(ctxCfg.ContextWindow)
 				ctxEntries, ctxErr := client.queryRaw(ctx, streamSelector, ctxStart, ctxEnd, ctxCfg.ContextLines)
@@ -137,61 +173,136 @@ func (r *Runner) poll(ctx context.Context) {
 			}
 
 			for _, g := range groupMap {
-				// Benign check uses _msg only — not the full field dump — so that
-				// an attacker cannot craft objectRef.name to match a benign pattern
-				// and suppress a real finding.
-				if isBenign(g.msgs, r.cfg.Detector.KnownBenign) {
+				if isBenign(g.msgs, d.KnownBenign) {
 					slog.Debug("suppressed by known-benign", "rule", rule.ID)
 					continue
 				}
-				fp := Fingerprint(rule.ID, srcName, g.key)
-				quiet, err := r.db.IsQuiet(fp)
+
+				groupFP := GroupFP(rule.ID, srcName, g.actorKey)
+
+				// Respect manual /quiet on this group.
+				quiet, err := r.db.IsQuiet(groupFP)
 				if err != nil {
-					slog.Warn("db isquiet error", "err", err)
+					slog.Warn("db IsQuiet error", "err", err)
 					continue
 				}
 				if quiet {
 					continue
 				}
-				_, err = r.db.Upsert(fp, rule.ID, rule.Severity, srcName)
+
+				objSamples := samplesFromSet(g.objects, d.SampleObjectsMax)
+
+				gw, err := r.db.ActiveGroupWindow(groupFP)
 				if err != nil {
-					slog.Warn("db upsert error", "err", err)
+					slog.Warn("db ActiveGroupWindow error", "err", err)
+					continue
 				}
-				// Apply quiet window on every emit:
-				// - With key_fields: use quiet_window_default (actor/object scope).
-				// - Without key_fields (msg-hash key): use 2×interval+overlap to
-				//   dedup across the poll overlap window without long-term silence.
-				//   This prevents the same _msg from firing twice due to the 5s
-				//   overlap, while new unique messages always produce fresh findings.
-				var quietUntil time.Time
-				if len(rule.KeyFields) > 0 && r.cfg.Detector.QuietWindowDefault > 0 {
-					quietUntil = now.Add(r.cfg.Detector.QuietWindowDefault)
-				} else if len(rule.KeyFields) == 0 {
-					quietUntil = now.Add(2*interval + pollOverlap)
-				}
-				if !quietUntil.IsZero() {
-					if err := r.db.SetQuiet(fp, quietUntil); err != nil {
-						slog.Warn("db setquiet error", "err", err)
+
+				if gw != nil {
+					// Window already open: increment count and merge object samples.
+					merged := mergeSamples(unmarshalSamples(gw.ObjectSamples), objSamples, d.SampleObjectsMax)
+					gw, err = r.db.IncrGroupWindow(gw.ID, marshalSamples(merged))
+					if err != nil {
+						slog.Warn("db IncrGroupWindow error", "err", err)
+						continue
 					}
-				}
-				r.out <- Finding{
-					Fingerprint:  fp,
-					RuleID:       rule.ID,
-					Severity:     rule.Severity,
-					Source:       srcName,
-					Description:  rule.Description,
-					Evidence:     truncate(g.evidence, 10),
-					ContextLines: truncate(ctxLines, ctxCfg.ContextLines),
-					FiredAt:      now,
+					metrics.GroupEventsTotal.WithLabelValues(rule.ID, srcName).Inc()
+					r.out <- Finding{
+						Fingerprint:   groupFP,
+						RuleID:        rule.ID,
+						Severity:      rule.Severity,
+						Source:        srcName,
+						Description:   rule.Description,
+						Evidence:      truncate(g.evidence, 10),
+						ContextLines:  truncate(ctxLines, ctxCfg.ContextLines),
+						FiredAt:       now,
+						GroupEvent:    GroupEventUpdate,
+						GroupCount:    gw.Count,
+						GroupActorKey: g.actorKey,
+						GroupObjects:  unmarshalSamples(gw.ObjectSamples),
+						GroupWindowID: gw.ID,
+					}
+				} else {
+					// No active window: open a new one.
+					openUntil := now.Add(groupWindow)
+					gw, err = r.db.OpenGroupWindow(groupFP, rule.ID, rule.Severity, srcName,
+						g.actorKey, openUntil, marshalSamples(objSamples))
+					if err != nil {
+						slog.Warn("db OpenGroupWindow error", "err", err)
+						continue
+					}
+					// Upsert a Finding record so /quiet works on the group_fp.
+					if _, err := r.db.Upsert(groupFP, rule.ID, rule.Severity, srcName); err != nil {
+						slog.Warn("db Upsert error", "err", err)
+					}
+					metrics.FindingsTotal.WithLabelValues(rule.ID, srcName, rule.Severity).Inc()
+					r.out <- Finding{
+						Fingerprint:   groupFP,
+						RuleID:        rule.ID,
+						Severity:      rule.Severity,
+						Source:        srcName,
+						Description:   rule.Description,
+						Evidence:      truncate(g.evidence, 10),
+						ContextLines:  truncate(ctxLines, ctxCfg.ContextLines),
+						FiredAt:       now,
+						GroupEvent:    GroupEventOpen,
+						GroupCount:    1,
+						GroupActorKey: g.actorKey,
+						GroupObjects:  objSamples,
+						GroupWindowID: gw.ID,
+					}
 				}
 			}
 		}
 	}
 
-	// Fail-open pattern scan over the full log tail.
-	if len(r.cfg.Detector.FailOpenPatterns) > 0 {
+	// Fail-open pattern scan.
+	if len(d.FailOpenPatterns) > 0 {
 		start := now.Add(-interval)
 		r.scanFailOpen(ctx, start, now)
+	}
+
+	// Periodic SeenEvent purge — keep the table small.
+	if err := r.db.PurgeExpiredSeenEvents(d.SeenEventTTL); err != nil {
+		slog.Warn("db PurgeExpiredSeenEvents error", "err", err)
+	}
+}
+
+// closeExpiredWindows closes GroupWindows whose open_until has passed and emits
+// group_closed findings for groups with more than one event.
+func (r *Runner) closeExpiredWindows(now time.Time) {
+	rows, err := r.db.ExpiredGroupWindows()
+	if err != nil {
+		slog.Warn("db ExpiredGroupWindows error", "err", err)
+		return
+	}
+	for _, gw := range rows {
+		if err := r.db.CloseGroupWindow(gw.ID); err != nil {
+			slog.Warn("db CloseGroupWindow error", "err", err)
+			continue
+		}
+		// Single-event groups are fully represented by their group_open finding.
+		if gw.Count <= 1 {
+			continue
+		}
+		metrics.GroupsClosedTotal.WithLabelValues(gw.RuleID, gw.Source).Inc()
+		desc := ""
+		if rule := r.ruleByID(gw.RuleID); rule != nil {
+			desc = rule.Description
+		}
+		r.out <- Finding{
+			Fingerprint:   gw.GroupFP,
+			RuleID:        gw.RuleID,
+			Severity:      gw.Severity,
+			Source:        gw.Source,
+			Description:   desc,
+			FiredAt:       now,
+			GroupEvent:    GroupEventClosed,
+			GroupCount:    gw.Count,
+			GroupActorKey: gw.ActorKey,
+			GroupObjects:  unmarshalSamples(gw.ObjectSamples),
+			GroupWindowID: gw.ID,
+		}
 	}
 }
 
@@ -226,39 +337,90 @@ func entryLine(e vlEntry) string {
 	return strings.Join(parts, " ")
 }
 
-// ruleKey computes the fingerprint key component for one log entry.
-//
-// When key_fields is set, it hashes the values of those fields from the
-// entry's tags, scoping quiet windows to a specific actor/object pair.
-//
-// When key_fields is empty (text rules, syslog), it falls back to hashing
-// _msg. This is the fail-safe default: unique log lines produce distinct
-// fingerprints (noisy but safe), while exact-duplicate lines dedup normally.
-// The empty-key (whole-rule) scope is NOT used, because a single event would
-// silence the whole rule for 24h — an attacker primitive.
-//
-// Note: key_fields reads e.Tags only; _msg is not in Tags (it is e.Msg).
-// Use the special sentinel value "_msg" in key_fields only as an explicit
-// override — it will always read as "" from Tags and collapse all events.
-// The msg-hash fallback (no key_fields) is the correct way to key on content.
-//
-// Key field selection guidance: prefer fields controlled by the API server
-// (user.username, verb) over fully attacker-controlled target identifiers
-// (objectRef.name). Including target fields is still useful — a new target
-// always produces a fresh finding — but does not confer suppression power.
-func ruleKey(rule config.Rule, e vlEntry) string {
+// actorKeyStr returns a human-readable actor key for grouping. When
+// actor_fields is empty, "" is returned (whole-rule group).
+func actorKeyStr(rule config.Rule, e vlEntry) string {
+	if len(rule.ActorFields) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(rule.ActorFields))
+	for _, field := range rule.ActorFields {
+		if v := e.Tags[field]; v != "" {
+			parts = append(parts, v)
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// objectFields returns the key_fields that are NOT in actor_fields.
+func objectFields(rule config.Rule) []string {
 	if len(rule.KeyFields) == 0 {
-		// Fail-safe default: key on _msg content so identical lines dedup but
-		// new content always fires.
-		h := sha256.New()
-		fmt.Fprintf(h, "msg=%s", e.Msg)
-		return fmt.Sprintf("%x", h.Sum(nil))[:12]
+		return nil
 	}
-	h := sha256.New()
-	for _, field := range rule.KeyFields {
-		fmt.Fprintf(h, "%s=%s\x00", field, e.Tags[field])
+	actorSet := make(map[string]struct{}, len(rule.ActorFields))
+	for _, f := range rule.ActorFields {
+		actorSet[f] = struct{}{}
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+	out := make([]string, 0, len(rule.KeyFields))
+	for _, f := range rule.KeyFields {
+		if _, isActor := actorSet[f]; !isActor {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// samplesFromSet returns up to max unique strings from a set, sorted.
+func samplesFromSet(s map[string]struct{}, max int) []string {
+	out := make([]string, 0, len(s))
+	for v := range s {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out
+}
+
+// mergeSamples merges existing and new sample lists, keeping up to max unique
+// entries in stable order (existing first).
+func mergeSamples(existing, newSamples []string, max int) []string {
+	seen := make(map[string]struct{}, len(existing))
+	out := make([]string, 0, len(existing)+len(newSamples))
+	for _, v := range existing {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	for _, v := range newSamples {
+		if len(out) >= max {
+			break
+		}
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func marshalSamples(s []string) string {
+	if len(s) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func unmarshalSamples(s string) []string {
+	if s == "" || s == "[]" {
+		return nil
+	}
+	var out []string
+	_ = json.Unmarshal([]byte(s), &out)
+	return out
 }
 
 // logsqlQuote escapes backslashes and double-quotes in a literal string so it
@@ -271,8 +433,6 @@ func logsqlQuote(s string) string {
 
 func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 	for _, pattern := range r.cfg.Detector.FailOpenPatterns {
-		// LogsQL: a quoted string is a substring filter against all streams.
-		// Escape backslashes and double-quotes in the pattern before interpolation.
 		query := logsqlQuote(pattern)
 		for srcName, client := range r.clients {
 			lines, err := client.Query(ctx, query, start, end, 20)
@@ -288,6 +448,7 @@ func (r *Runner) scanFailOpen(ctx context.Context, start, end time.Time) {
 				continue
 			}
 			r.db.Upsert(fp, "fail-open", SeverityMedium, srcName) //nolint:errcheck
+			metrics.FindingsTotal.WithLabelValues("fail-open", srcName, SeverityMedium).Inc()
 			r.out <- Finding{
 				Fingerprint: fp,
 				RuleID:      "fail-open",
@@ -310,6 +471,7 @@ func (r *Runner) emitDetectorError(ctx context.Context, rule config.Rule, srcNam
 		return
 	}
 	r.db.Upsert(fp, "detector-error", SeverityHigh, srcName) //nolint:errcheck
+	metrics.FindingsTotal.WithLabelValues("detector-error", srcName, SeverityHigh).Inc()
 	r.out <- Finding{
 		Fingerprint: fp,
 		RuleID:      "detector-error",
@@ -319,6 +481,15 @@ func (r *Runner) emitDetectorError(ctx context.Context, rule config.Rule, srcNam
 		Evidence:    []string{queryErr.Error()},
 		FiredAt:     time.Now(),
 	}
+}
+
+func (r *Runner) ruleByID(id string) *config.Rule {
+	for i := range r.cfg.Detector.Rules {
+		if r.cfg.Detector.Rules[i].ID == id {
+			return &r.cfg.Detector.Rules[i]
+		}
+	}
+	return nil
 }
 
 func (r *Runner) clientsForRule(rule config.Rule) map[string]*VLClient {

@@ -2,10 +2,8 @@
 //
 // The goroutine wakes exactly at the configured HH:MM in the configured IANA
 // timezone (default 19:00 Asia/Nicosia). If there are no findings in the
-// previous 24 h the digest is silently skipped — it never sends an empty
-// message. The summary is emitted as a structured JSON line to stdout (picked
-// up by vlagent) and, if the board sink is enabled, as a board thread reply or
-// new thread.
+// previous new_lookback window the digest is silently skipped. The summary is
+// emitted as a structured JSON line to stdout (picked up by vlagent).
 package digest
 
 import (
@@ -23,14 +21,13 @@ import (
 
 // Runner sends the daily digest.
 type Runner struct {
-	cfg         config.DigestConfig
-	db          *state.DB
-	boardEmit   func(ctx context.Context, title, body string)
+	cfg config.DigestConfig
+	db  *state.DB
 }
 
-// New creates a Runner. boardEmit may be nil if the board sink is disabled.
-func New(cfg config.DigestConfig, db *state.DB, boardEmit func(context.Context, string, string)) *Runner {
-	return &Runner{cfg: cfg, db: db, boardEmit: boardEmit}
+// New creates a Runner.
+func New(cfg config.DigestConfig, db *state.DB) *Runner {
+	return &Runner{cfg: cfg, db: db}
 }
 
 // Run blocks until ctx is cancelled, firing the digest at the configured time
@@ -52,7 +49,6 @@ func (r *Runner) Run(ctx context.Context) {
 		case <-time.After(time.Until(next)):
 		}
 
-		// Re-check after wakeup (ctx may have been cancelled while sleeping).
 		if ctx.Err() != nil {
 			return
 		}
@@ -82,20 +78,19 @@ func parseHHMM(s string) (hour, min int) {
 }
 
 func (r *Runner) fire(ctx context.Context, fireTime time.Time) {
-	since := fireTime.Add(-24 * time.Hour)
-	findings, err := r.db.FindingsSince(since)
+	since := fireTime.Add(-r.cfg.NewLookback)
+	entries, err := r.db.DigestEntries(since)
 	if err != nil {
 		slog.Warn("digest: db query", "err", err)
 		return
 	}
-	if len(findings) == 0 {
+	if len(entries) == 0 {
 		slog.Debug("digest: no findings, skipping")
 		return
 	}
 
-	title, body := buildDigest(findings, since, fireTime)
+	title, body := buildDigest(entries, since, fireTime)
 
-	// Emit to stdout as a structured JSON line.
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(map[string]interface{}{
@@ -105,28 +100,21 @@ func (r *Runner) fire(ctx context.Context, fireTime time.Time) {
 		"title": title,
 		"body":  body,
 	})
-
-	// Post to board if configured.
-	if r.boardEmit != nil {
-		r.boardEmit(ctx, title, body)
-	}
 }
 
-func buildDigest(findings []state.DigestFinding, since, until time.Time) (title, body string) {
-	// Count by severity.
+func buildDigest(entries []state.DigestEntry, since, until time.Time) (title, body string) {
 	counts := map[string]int{}
-	for _, f := range findings {
-		counts[f.Severity]++
+	for _, e := range entries {
+		counts[e.Severity]++
 	}
 
-	title = fmt.Sprintf("📋 Дайджест %s — %d событий",
-		until.Format("2006-01-02"), len(findings))
+	title = fmt.Sprintf("Дайджест %s — %d событий",
+		until.Format("2006-01-02"), len(entries))
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**Период:** %s — %s\n\n",
-		since.Format("15:04"), until.Format("15:04 MST 2006-01-02"))
+		since.Format("15:04 MST 2006-01-02"), until.Format("15:04 MST 2006-01-02"))
 
-	// Severity summary table.
 	for _, sev := range []string{"critical", "high", "medium", "low"} {
 		if n := counts[sev]; n > 0 {
 			fmt.Fprintf(&sb, "- **%s**: %d\n", strings.ToUpper(sev), n)
@@ -134,21 +122,36 @@ func buildDigest(findings []state.DigestFinding, since, until time.Time) (title,
 	}
 	sb.WriteString("\n")
 
-	// Per-finding lines (cap at 20 to keep the post readable).
-	listed := findings
+	listed := entries
 	truncated := false
 	if len(listed) > 20 {
 		listed = listed[:20]
 		truncated = true
 	}
-	for _, f := range listed {
-		fmt.Fprintf(&sb, "- `[%s]` **%s** — %s (%s)\n",
-			strings.ToUpper(f.Severity), f.RuleID, f.Source,
-			f.LastFiredAt.Format("15:04"))
+	for _, e := range listed {
+		sb.WriteString(formatEntry(e))
+		sb.WriteByte('\n')
 	}
 	if truncated {
-		fmt.Fprintf(&sb, "- _...и ещё %d событий_\n", len(findings)-20)
+		fmt.Fprintf(&sb, "- _...и ещё %d событий_\n", len(entries)-20)
 	}
 
 	return title, sb.String()
+}
+
+func formatEntry(e state.DigestEntry) string {
+	sev := strings.ToUpper(e.Severity)
+	if e.GroupCount > 1 {
+		// Grouped finding: show count and actor, use first→last range.
+		timeRange := e.GroupFirstAt.Format("15:04") + "–" + e.GroupLastAt.Format("15:04")
+		if e.GroupActorKey != "" {
+			return fmt.Sprintf("- `[%s]` **%s** — %s — %d событий, актор: `%s` (%s)",
+				sev, e.RuleID, e.Source, e.GroupCount, e.GroupActorKey, timeRange)
+		}
+		return fmt.Sprintf("- `[%s]` **%s** — %s — %d событий (%s)",
+			sev, e.RuleID, e.Source, e.GroupCount, timeRange)
+	}
+	// Non-grouped or single-event finding.
+	return fmt.Sprintf("- `[%s]` **%s** — %s (%s)",
+		sev, e.RuleID, e.Source, e.LastFiredAt.Format("15:04"))
 }

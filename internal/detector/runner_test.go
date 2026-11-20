@@ -68,36 +68,71 @@ func TestEntryLine(t *testing.T) {
 	}
 }
 
-func TestRuleKey(t *testing.T) {
-	rule := config.Rule{ID: "r", KeyFields: []string{"user.username", "objectRef.name"}}
-	e := vlEntry{Tags: map[string]string{"user.username": "alice", "objectRef.name": "role-x"}}
+func TestActorKeyStr(t *testing.T) {
+	rule := config.Rule{
+		ID:           "r",
+		KeyFields:    []string{"user.username", "objectRef.name"},
+		ActorFields:  []string{"user.username"},
+	}
+	eAlice := vlEntry{Tags: map[string]string{"user.username": "alice", "objectRef.name": "role-x"}}
+	eBob := vlEntry{Tags: map[string]string{"user.username": "bob", "objectRef.name": "role-x"}}
 
-	k1 := ruleKey(rule, e)
-	if k1 == "" {
-		t.Fatal("expected non-empty key with key_fields set")
+	k1 := actorKeyStr(rule, eAlice)
+	if k1 != "alice" {
+		t.Errorf("actorKeyStr: got %q, want %q", k1, "alice")
+	}
+	if actorKeyStr(rule, eBob) == k1 {
+		t.Error("different user.username must produce different actor key")
 	}
 
-	// Different user → different key.
-	e2 := vlEntry{Tags: map[string]string{"user.username": "bob", "objectRef.name": "role-x"}}
-	if ruleKey(rule, e2) == k1 {
-		t.Error("different user.username must produce different key")
+	// No actor_fields → "" (whole-rule group, safe fallback for burst storms).
+	ruleNoActor := config.Rule{ID: "r", KeyFields: []string{"objectRef.name"}}
+	if actorKeyStr(ruleNoActor, eAlice) != "" {
+		t.Error("rule without actor_fields must return empty string (whole-rule group)")
 	}
 
-	// No key_fields → hash of _msg (fail-safe, not empty).
-	ruleNoFields := config.Rule{ID: "r"}
-	eMsg1 := vlEntry{Msg: "failed password for alice"}
-	eMsg2 := vlEntry{Msg: "failed password for alice"}
-	eMsg3 := vlEntry{Msg: "failed password for bob"}
+	// Multiple actor_fields → joined with "/".
+	ruleMulti := config.Rule{
+		ID:          "r",
+		ActorFields: []string{"user.username", "user.groups"},
+	}
+	eMulti := vlEntry{Tags: map[string]string{"user.username": "alice", "user.groups": "admins"}}
+	got := actorKeyStr(ruleMulti, eMulti)
+	if got != "alice/admins" {
+		t.Errorf("multi-field actor key: got %q, want %q", got, "alice/admins")
+	}
+}
 
-	k2 := ruleKey(ruleNoFields, eMsg1)
-	if k2 == "" {
-		t.Error("rule without key_fields must return non-empty key (msg hash)")
+func TestEventID(t *testing.T) {
+	// When auditID is set, it is returned directly.
+	id := EventID("audit-123", "2026-01-01T00:00:00Z", "stream-1", "some msg")
+	if id != "audit-123" {
+		t.Errorf("EventID with auditID: got %q, want %q", id, "audit-123")
 	}
-	if ruleKey(ruleNoFields, eMsg2) != k2 {
-		t.Error("identical _msg must produce identical key")
+
+	// Without auditID: same time+stream+msg → same hash.
+	h1 := EventID("", "2026-01-01T00:00:00Z", "stream-1", "failed password for alice")
+	h2 := EventID("", "2026-01-01T00:00:00Z", "stream-1", "failed password for alice")
+	if h1 != h2 {
+		t.Error("identical inputs must produce identical event ID")
 	}
-	if ruleKey(ruleNoFields, eMsg3) == k2 {
-		t.Error("different _msg must produce different key")
+
+	// Different _time → different event ID (prevents collapsing duplicates from different times).
+	h3 := EventID("", "2026-01-01T00:00:01Z", "stream-1", "failed password for alice")
+	if h1 == h3 {
+		t.Error("different _time must produce different event ID")
+	}
+
+	// Different _stream_id → different event ID.
+	h4 := EventID("", "2026-01-01T00:00:00Z", "stream-2", "failed password for alice")
+	if h1 == h4 {
+		t.Error("different _stream_id must produce different event ID")
+	}
+
+	// Different msg → different event ID.
+	h5 := EventID("", "2026-01-01T00:00:00Z", "stream-1", "failed password for bob")
+	if h1 == h5 {
+		t.Error("different msg must produce different event ID")
 	}
 }
 

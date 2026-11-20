@@ -35,11 +35,64 @@ type Finding struct {
 	ContextLines []string
 	// FiredAt is when the detector produced this finding.
 	FiredAt time.Time
+
+	// GroupEvent indicates what kind of burst-grouping event this is.
+	// Zero value (GroupEventNone) means the old non-grouped path.
+	GroupEvent GroupEvent
+	// GroupCount is the total number of events in the group at this point.
+	GroupCount int
+	// GroupActorKey is the human-readable actor key
+	// (e.g. "system:kube-controller-manager" or "" for whole-rule groups).
+	GroupActorKey string
+	// GroupObjects is the sampled list of object names (key_fields minus actor_fields).
+	GroupObjects []string
+	// GroupWindowID is the DB row ID of the GroupWindow; non-zero when grouped.
+	GroupWindowID uint
 }
+
+// GroupEvent classifies a grouped finding for the sinks.
+type GroupEvent uint8
+
+const (
+	// GroupEventNone is a non-grouped finding (old path, GroupWindowID == 0).
+	GroupEventNone GroupEvent = iota
+	// GroupEventOpen is emitted when the first event opens a new GroupWindow.
+	// Both stdout (as "finding") and board sink see it.
+	GroupEventOpen
+	// GroupEventUpdate is emitted when events arrive in an already-open window.
+	// Board sink replies to the existing thread; stdout emits "group_update"
+	// (NOT a "finding" line — no Grafana alert).
+	GroupEventUpdate
+	// GroupEventClosed is emitted when a GroupWindow expires.
+	// Both stdout (as "finding") and board sink see it.
+	GroupEventClosed
+)
 
 // Fingerprint computes a stable fingerprint for a (ruleID, source, key) triple.
 func Fingerprint(ruleID, source, key string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%s", ruleID, source, key)
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
+}
+
+// GroupFP computes the burst-grouping fingerprint for a (ruleID, source, actorKey)
+// triple. When actorKey is empty (no actor_fields configured), the group covers
+// the whole rule+source, preventing burst storms from opening one finding per object.
+func GroupFP(ruleID, source, actorKey string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "group\x00%s\x00%s\x00%s", ruleID, source, actorKey)
+	return fmt.Sprintf("%x", h.Sum(nil))[:16]
+}
+
+// EventID computes a dedup event ID from raw log fields. When auditID is
+// non-empty it is used directly (Kubernetes audit log path). Otherwise a hash
+// of (_time, streamID, msg) is returned to prevent collapsing identical messages
+// from different streams or times.
+func EventID(auditID, eventTime, streamID, msg string) string {
+	if auditID != "" {
+		return auditID
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00%s", eventTime, streamID, msg)
+	return fmt.Sprintf("%x", h.Sum(nil))[:32]
 }

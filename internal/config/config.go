@@ -22,17 +22,43 @@ type Config struct {
 	// LLM configures the optional triage layer.
 	LLM LLMConfig `yaml:"llm"`
 
-	// Sinks configure where findings are sent.
-	Sinks SinksConfig `yaml:"sinks"`
-
 	// Detector configures the deterministic detection layer.
 	Detector DetectorConfig `yaml:"detector"`
 
 	// Digest configures the daily low-severity digest.
 	Digest DigestConfig `yaml:"digest"`
 
-	// Commands configures the board reply command parser.
-	Commands CommandsConfig `yaml:"commands"`
+	// MCP configures general-purpose MCP server clients used by the context
+	// collector and LLM verdict layer.
+	MCP MCPConfig `yaml:"mcp"`
+}
+
+// MCPConfig holds a list of named MCP server configurations.
+type MCPConfig struct {
+	Servers []MCPServer `yaml:"servers"`
+}
+
+// MCPServer is one MCP endpoint the sentinel may call.
+type MCPServer struct {
+	// Name is a short stable identifier used in logs and metrics.
+	Name string `yaml:"name"`
+	// URL is the base HTTP endpoint (Streamable HTTP transport).
+	URL string `yaml:"url"`
+	// Token / TokenFile / TokenEnv: first non-empty wins.
+	// Token is a literal bearer token (avoid committing secrets).
+	Token string `yaml:"token"`
+	// TokenFile is a path to a file whose first line is the bearer token.
+	TokenFile string `yaml:"token_file"`
+	// TokenEnv is an environment variable name holding the bearer token.
+	TokenEnv string `yaml:"token_env"`
+	// Timeout is the per-call deadline (default 30s).
+	Timeout time.Duration `yaml:"timeout"`
+	// Tools is the allowlist of tool names this client may call.
+	// Empty means nothing is callable (fail-safe default).
+	Tools []string `yaml:"tools"`
+	// CallCap is the maximum number of tool calls per request (default 10).
+	// Prevents runaway loops when used by the LLM verdict layer.
+	CallCap int `yaml:"call_cap"`
 }
 
 // LogSource is a single log backend.
@@ -76,34 +102,6 @@ type LLMConfig struct {
 	PromptsDir string `yaml:"prompts_dir"`
 }
 
-// SinksConfig lists the output channels.
-type SinksConfig struct {
-	// StdoutJSON writes every finding as a JSON line to stdout (always on).
-	StdoutJSON bool `yaml:"stdout_json"`
-
-	// Board configures the coordination board sink.
-	Board BoardSinkConfig `yaml:"board"`
-
-	// Webhook is an optional generic HTTP sink.
-	Webhook WebhookSinkConfig `yaml:"webhook"`
-}
-
-// BoardSinkConfig configures the board MCP client.
-type BoardSinkConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"`
-	Token   string `yaml:"token"`
-	// MinSeverity is the minimum severity to post; below this → digest only.
-	MinSeverity string `yaml:"min_severity"`
-}
-
-// WebhookSinkConfig is a generic HTTP POST sink.
-type WebhookSinkConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"`
-	Token   string `yaml:"token"`
-}
-
 // DetectorConfig controls the deterministic detection layer.
 type DetectorConfig struct {
 	// Interval is how often the detector polls (default 1m).
@@ -122,6 +120,16 @@ type DetectorConfig struct {
 	FailOpenPatterns []string `yaml:"fail_open_patterns"`
 	// KnownBenign lists patterns that are never escalated to a notification.
 	KnownBenign []KnownBenignEntry `yaml:"known_benign"`
+	// GroupWindowDefault is the tumbling burst-grouping window for all rules
+	// that don't set their own group_window (default 10m).
+	GroupWindowDefault time.Duration `yaml:"group_window_default"`
+	// SampleObjectsMax is the max number of distinct objectRef.name values to
+	// collect per GroupWindow row (default 5). Extra values are dropped to keep
+	// DB size predictable.
+	SampleObjectsMax int `yaml:"sample_objects_max"`
+	// SeenEventTTL controls how long a seen event_id is retained for dedup
+	// (default 1h). Events older than the poll overlap don't need to be retained.
+	SeenEventTTL time.Duration `yaml:"seen_event_ttl"`
 }
 
 // Rule is a single LogsQL-based detection rule.
@@ -136,12 +144,23 @@ type Rule struct {
 	Description string `yaml:"description"`
 	// Source names the LogSource(s) this rule applies to (empty = all).
 	Source string `yaml:"source"`
-	// KeyFields are VictoriaLogs field names whose values are hashed into the
-	// fingerprint key. This scopes quiet windows to a specific actor/object
-	// combination rather than silencing the whole rule.
+	// KeyFields are VictoriaLogs field names whose values are shown in evidence.
+	// They no longer drive the grouping fingerprint — ActorFields does.
 	// Example: [user.username, objectRef.namespace, objectRef.name]
-	// Falls back to the empty string (whole-rule scope) when not set.
 	KeyFields []string `yaml:"key_fields"`
+	// ActorFields are the subset of key_fields that identify the actor for
+	// burst grouping. Events with the same rule + actor within group_window
+	// collapse into one finding. If empty, the whole rule is one group per
+	// window (safe fallback for rules that caused burst noise).
+	ActorFields []string `yaml:"actor_fields"`
+	// AuditIDField is the VictoriaLogs field holding the unique audit event
+	// ID (e.g. "auditID" for Kubernetes audit logs). Used for exact dedup
+	// across poll overlaps and pod restarts. If empty, dedup falls back to
+	// hash(_time + _stream_id + _msg).
+	AuditIDField string `yaml:"audit_id_field"`
+	// GroupWindow overrides the detector-level group_window_default for this
+	// rule. Zero means use the default.
+	GroupWindow time.Duration `yaml:"group_window"`
 }
 
 // KnownBenignEntry is a log-pattern + reason that suppresses notifications.
@@ -160,32 +179,10 @@ type DigestConfig struct {
 	Time string `yaml:"time"`
 	// Timezone is an IANA timezone name, e.g. "Asia/Nicosia".
 	Timezone string `yaml:"timezone"`
-}
-
-// Commands controls the /quiet /benign /unquiet command parser.
-type CommandsConfig struct {
-	// AllowedActors is a list of board actor IDs allowed to issue commands.
-	AllowedActors []string `yaml:"allowed_actors"`
-	// CriticalMuteActors can mute critical findings (subset of AllowedActors).
-	CriticalMuteActors []string `yaml:"critical_mute_actors"`
-	// ActorNames maps stable actor IDs to human-readable display names for
-	// confirmation messages. Authorization always uses the ID; this is display-only.
-	ActorNames map[string]string `yaml:"actor_names"`
-	// MaxAgentQuietDays is the max quiet duration an agent (non-critical-mute actor)
-	// can set via /quiet (default 7).
-	MaxAgentQuietDays int `yaml:"max_agent_quiet_days"`
-	// MaxAgentBenignDays is how long an agent's /benign entry lasts without
-	// operator confirmation (default 30).
-	MaxAgentBenignDays int `yaml:"max_agent_benign_days"`
-}
-
-// ActorLabel returns the display name for actorID if configured in ActorNames,
-// otherwise falls back to the raw ID.
-func (c CommandsConfig) ActorLabel(actorID string) string {
-	if name, ok := c.ActorNames[actorID]; ok && name != "" {
-		return name
-	}
-	return actorID
+	// NewLookback is how far back the digest looks for "new" findings that
+	// haven't appeared in a previous digest (default 14d). Longer means more
+	// catch-up after an outage; shorter means less noise from old data.
+	NewLookback time.Duration `yaml:"new_lookback"`
 }
 
 // Load reads and parses the YAML config at path, then merges any rules from
@@ -301,9 +298,6 @@ func setDefaults(cfg *Config) {
 	if cfg.State == "" {
 		cfg.State = "data/sentinel.db"
 	}
-	if cfg.Sinks.StdoutJSON {
-		// always-on; nothing to default
-	}
 	d := &cfg.Detector
 	if d.Interval == 0 {
 		d.Interval = time.Minute
@@ -316,6 +310,15 @@ func setDefaults(cfg *Config) {
 	}
 	if d.QuietWindowDefault == 0 {
 		d.QuietWindowDefault = 24 * time.Hour
+	}
+	if d.GroupWindowDefault == 0 {
+		d.GroupWindowDefault = 10 * time.Minute
+	}
+	if d.SampleObjectsMax == 0 {
+		d.SampleObjectsMax = 5
+	}
+	if d.SeenEventTTL == 0 {
+		d.SeenEventTTL = time.Hour
 	}
 	l := &cfg.LLM
 	if l.MaxTokensStep == 0 {
@@ -342,10 +345,16 @@ func setDefaults(cfg *Config) {
 	if cfg.Digest.Timezone == "" {
 		cfg.Digest.Timezone = "UTC"
 	}
-	if cfg.Commands.MaxAgentQuietDays == 0 {
-		cfg.Commands.MaxAgentQuietDays = 7
+	if cfg.Digest.NewLookback == 0 {
+		cfg.Digest.NewLookback = 14 * 24 * time.Hour
 	}
-	if cfg.Commands.MaxAgentBenignDays == 0 {
-		cfg.Commands.MaxAgentBenignDays = 30
+	for i := range cfg.MCP.Servers {
+		s := &cfg.MCP.Servers[i]
+		if s.Timeout == 0 {
+			s.Timeout = 30 * time.Second
+		}
+		if s.CallCap == 0 {
+			s.CallCap = 10
+		}
 	}
 }

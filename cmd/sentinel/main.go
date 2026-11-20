@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/urfave/cli/v3"
 
-	"github.com/JetManiack/log-sentinel/internal/board"
 	"github.com/JetManiack/log-sentinel/internal/config"
 	"github.com/JetManiack/log-sentinel/internal/detector"
 	"github.com/JetManiack/log-sentinel/internal/digest"
@@ -79,13 +79,13 @@ func run(ctx context.Context, cfgPath, listenAddr string) error {
 	}
 	triager := triage.New(cfg.LLM, mask)
 	stdout := sink.NewStdout()
-	boardClient := board.New(cfg.Sinks.Board, db)
 
 	// Start the HTTP admin server.
 	go func() {
 		r := chi.NewRouter()
 		r.Get("/livez", health.LivezHandler())
 		r.Get("/readyz", health.ReadyzHandler(db.GORM()))
+		r.Handle("/metrics", promhttp.Handler())
 		srv := &http.Server{
 			Addr:              listenAddr,
 			Handler:           r,
@@ -100,15 +100,8 @@ func run(ctx context.Context, cfgPath, listenAddr string) error {
 	// Start the detector.
 	go runner.Run(ctx)
 
-	// Poll board threads for /quiet /benign /unquiet commands.
-	go boardClient.PollCommands(ctx, cfg.Commands, db, cfg.Detector.Interval)
-
 	// Daily digest.
-	var digestBoardEmit func(context.Context, string, string)
-	if boardClient != nil {
-		digestBoardEmit = boardClient.EmitDigest
-	}
-	go digest.New(cfg.Digest, db, digestBoardEmit).Run(ctx)
+	go digest.New(cfg.Digest, db).Run(ctx)
 
 	slog.Info("sentinel started", "version", version)
 
@@ -120,7 +113,6 @@ func run(ctx context.Context, cfgPath, listenAddr string) error {
 		case f := <-findings:
 			enrichment := triager.Enrich(ctx, f, cfg.Detector.KnownBenign)
 			stdout.Emit(f, enrichment)
-			boardClient.Emit(ctx, f, enrichment)
 		}
 	}
 }
